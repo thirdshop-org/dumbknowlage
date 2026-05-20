@@ -209,6 +209,19 @@ def _run_nlp_pipeline(
     if build_graph:
         _build_graph(session_id, spacy_result, chunks, co_occurrences, topics, doc_metadata)
 
+    _auto_index(session_id, store)
+
+
+def _auto_index(session_id: str, store: SQLiteStore | None = None):
+    try:
+        from rag.indexer import index_session
+
+        idx = index_session(session_id)
+        if idx:
+            console.print(f"  [dim]→ Indexé dans ChromaDB: {idx} chunks[/]")
+    except Exception as e:
+        console.print(f"  [dim]→ Indexation ChromaDB ignorée: {e}[/]")
+
 
 def _display_analysis(frequencies, co_occurrences, tfidf, burst_topics, topics):
     # Fréquences
@@ -376,6 +389,7 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
                         gm.create_related_to(t1, k1, t2, k2, weight=1.0)
 
     # Sentences
+    sentences = []
     for c in chunks:
         sn = SentenceNode(
             text=c["text"],
@@ -384,6 +398,7 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
             chunk_index=c["chunk_index"],
         )
         gm.insert_sentence(sn)
+        sentences.append(sn)
         for t in spacy_result["tokens"]:
             if t["lemma"] in word_keys:
                 gm.create_sentence_word_link(sn._key, t["lemma"])
@@ -394,7 +409,10 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
             label = t["sentence"][:50]
             tn = TopicNode(label=label, weight=1.0 / (i + 1))
             gm.upsert_topic(tn)
-            gm.create_sentence_topic_link(sn._key, tn._key)
+            topic_text = t["sentence"].lower().strip()
+            for sn in sentences:
+                if topic_text in sn.text.lower():
+                    gm.create_sentence_topic_link(sn._key, tn._key)
 
     console.print("[green]Graphe construit avec succès ![/]")
     console.print("[dim]Accès: http://localhost:8529 (root / whispernlp)[/]")
@@ -796,9 +814,43 @@ def cmd_ingest(args: argparse.Namespace):
             console.print(f"\n[bold green]✓ Document ingéré ! Session ID: {sid}[/]")
 
 
+def cmd_rag(args: argparse.Namespace):
+    """Commandes RAG (indexation + questions)."""
+    if args.rag_command == "index":
+        from rag.indexer import index_all
+
+        console.print("[bold yellow]Indexation des sessions dans ChromaDB...[/]")
+        n = index_all(force=args.force)
+        console.print(f"[green]✓ {n} chunks indexés[/]")
+
+    elif args.rag_command == "query":
+        question = " ".join(args.question) if args.question else input("Question: ")
+        from rag.query_engine import query
+
+        result = query(question, top_k=args.top_k)
+        console.print(f"\n[bold]Réponse:[/]\n{result.answer}\n")
+        if result.sources:
+            table = Table(title="Sources")
+            table.add_column("Score", style="yellow")
+            table.add_column("Source", style="cyan")
+            for s in result.sources:
+                table.add_row(str(s["score"]), s["source"][:60])
+            console.print(table)
+
+
+def cmd_mcp(args: argparse.Namespace):
+    """Démarrer le serveur MCP."""
+    if args.mcp_mode == "stdio":
+        from mcp.server import main_stdio
+        main_stdio()
+    else:
+        from mcp.server import main as mcp_cli
+        mcp_cli()
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="whisper-nlp-graph — Transcription Whisper + NLP + Graphe de connaissances",
+        description="whisper-nlp-graph — Transcription Whisper + NLP + Graphe + RAG",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemples:
@@ -819,6 +871,15 @@ Exemples:
   # Ingérer tout un dossier de documents
   python main.py ingest ./documents/ --build-graph
   python main.py ingest ./docs/ --recursive --build-graph
+
+  # RAG
+  python main.py rag index                  # Indexer tout dans ChromaDB
+  python main.py rag index --force          # Ré-indexer tout
+  python main.py rag query "question"       # Poser une question
+
+  # Serveur MCP
+  python main.py mcp                        # CLI interactif
+  python main.py mcp stdio                  # Mode stdio (pour MCP host)
 
   # Lister les entités du graphe
   python main.py entities
@@ -910,6 +971,22 @@ Exemples:
     entity_parser.add_argument("name", help="Nom de l'entité (recherche partielle)")
     entity_parser.add_argument("--depth", type=int, default=2, help="Profondeur du réseau (défaut: 2)")
 
+    # rag
+    rag_parser = subparsers.add_parser("rag", help="Commandes RAG (indexation, questions)")
+    rag_sub = rag_parser.add_subparsers(dest="rag_command")
+
+    rag_index = rag_sub.add_parser("index", help="Indexer les sessions SQLite dans ChromaDB")
+    rag_index.add_argument("--force", action="store_true", help="Ré-indexer tout")
+
+    rag_query = rag_sub.add_parser("query", help="Poser une question sur les données")
+    rag_query.add_argument("question", nargs="*", help="Question (optionnel, sinon mode interactif)")
+    rag_query.add_argument("--top-k", type=int, default=config.rag.top_k, help="Nombre de chunks à retrouver")
+
+    # mcp
+    mcp_parser = subparsers.add_parser("mcp", help="Serveur MCP")
+    mcp_parser.add_argument("mcp_mode", nargs="?", default="cli", choices=["cli", "stdio"],
+                            help="Mode: cli (interactif) ou stdio (pour MCP host)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -926,6 +1003,8 @@ Exemples:
         "export": cmd_export,
         "entities": cmd_entities,
         "entity": cmd_entity,
+        "rag": cmd_rag,
+        "mcp": cmd_mcp,
     }
 
     cmd = commands.get(args.command)

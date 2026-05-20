@@ -80,6 +80,30 @@ class ExtractionConfig:
 
 
 @dataclass
+class RAGConfig:
+    embed_model: str = "nomic-embed-text"
+    embed_dim: int = 768
+    ollama_base_url: str = "http://192.168.1.21:11434"
+    llm_model: str = "mistral:latest"
+    chroma_persist_dir: str = ""
+    chroma_collection: str = "whisper_nlp_chunks"
+    top_k: int = 5
+    use_graph_enrichment: bool = True
+    similarity_threshold: float = 0.3
+
+    def __post_init__(self):
+        if not self.chroma_persist_dir:
+            self.chroma_persist_dir = os.path.join(
+                os.path.dirname(__file__), "data", "chroma_db"
+            )
+
+
+@dataclass
+class MCPConfig:
+    server_name: str = "whisper-nlp-graph"
+
+
+@dataclass
 class AppConfig:
     whisper: WhisperConfig = field(default_factory=WhisperConfig)
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
@@ -88,6 +112,8 @@ class AppConfig:
     arango: ArangoConfig = field(default_factory=ArangoConfig)
     sqlite: SQLiteConfig = field(default_factory=SQLiteConfig)
     extraction: ExtractionConfig = field(default_factory=ExtractionConfig)
+    rag: RAGConfig = field(default_factory=RAGConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
 
     data_dir: str = os.path.join(os.path.dirname(__file__), "data")
 

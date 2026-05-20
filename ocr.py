@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Screenshot → OCR → Presse-papier"""
+"""Screenshot → OCR → Presse-papier (optionnel: ingestion NLP + graphe)"""
 
 import argparse
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytesseract
 from PIL import Image, ImageFilter
+
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
 
 
 def capture_screen(region: bool = False) -> Path:
@@ -43,13 +49,43 @@ def copy_to_clipboard(text: str):
     )
 
 
+def ingest_text(text: str, lang: str, build_graph: bool):
+    from document.reader import chunk_text
+    from main import _run_nlp_pipeline
+    from storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore()
+    store.connect()
+
+    session_id = store.create_session(
+        source=f"ocr_{time.strftime('%Y%m%d_%H%M%S')}",
+        language=lang,
+        model="ocr/tesseract",
+    )
+
+    chunks = chunk_text(text)
+    store.insert_chunks_batch(session_id, chunks)
+
+    console.print(f"\n[bold cyan]Ingestion OCR (session: {session_id})...[/]")
+    _run_nlp_pipeline(
+        store, session_id, chunks, lang.split("+")[0],
+        build_graph=build_graph,
+    )
+
+    console.print(f"\n[bold green]✓ Texte OCR ingéré ! Session ID: {session_id}[/]")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Screenshot → OCR → Presse-papier")
+    parser = argparse.ArgumentParser(
+        description="Screenshot → OCR → Presse-papier (ou ingestion NLP)",
+    )
     parser.add_argument("--region", "-r", action="store_true", help="Sélectionner une zone")
     parser.add_argument("--image", "-i", type=Path, help="OCR depuis un fichier image")
     parser.add_argument("--lang", "-l", default="fra+eng", help="Langue OCR (défaut: fra+eng)")
     parser.add_argument("--no-clipboard", "-n", action="store_true", help="Ne pas copier dans le presse-papier")
     parser.add_argument("--preprocess", "-p", action="store_true", help="Améliorer l'image avant OCR")
+    parser.add_argument("--ingest", action="store_true", help="Ingérer le texte dans la base mémoire (NLP + graphe)")
+    parser.add_argument("--build-graph", action="store_true", help="Construire le graphe ArangoDB")
     args = parser.parse_args()
 
     if args.image:
@@ -79,6 +115,9 @@ def main():
     if not args.no_clipboard:
         copy_to_clipboard(text)
         print("✓ Copié dans le presse-papier")
+
+    if args.ingest:
+        ingest_text(text, args.lang, args.build_graph)
 
     path.unlink(missing_ok=True)
 

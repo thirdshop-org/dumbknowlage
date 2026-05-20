@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-import hashlib
-import re
-
-
-def sanitize_key(s: str) -> str:
-    sanitized = re.sub(r'[^a-zA-Z0-9\-_:.@]', '_', s)
-    sanitized = re.sub(r'_+', '_', sanitized).strip('_').lower()
-    return sanitized or 'unknown'
+from graph.models import sanitize_key
 
 
 class EntityBase:
