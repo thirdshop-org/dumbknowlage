@@ -258,7 +258,8 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
                  doc_metadata: dict | None = None):
     console.print("  [bold yellow]Construction du graphe ArangoDB...[/]")
     from graph.arango_client import GraphManager
-    from graph.models import DocumentNode, SentenceNode, TopicNode, WordNode
+    from graph.entity_models import entity_from_label
+    from graph.models import DocumentNode, SentenceNode, TopicNode, WordNode, sanitize_key
 
     gm = GraphManager()
     if not gm.connect():
@@ -313,6 +314,66 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
     # Co-occurrences
     for (a, b), count in co_occurrences:
         gm.create_co_occurrence(a, b, count)
+
+    # --- Entités typées ---
+    entity_map: dict[str, tuple[str, str]] = {}  # text_lower → (type, key)
+
+    for ent in spacy_result["entities"]:
+        entity = entity_from_label(ent["label"], ent["text"])
+        if entity is None:
+            continue
+        gm.upsert_entity(entity)
+        gm.create_appears_in(entity.collection, entity._key, doc_node._key)
+        entity_map[ent["text"].lower()] = (entity.collection, entity._key)
+        # Link entity word in Word collection to the typed entity
+        word_key = sanitize_key(ent["text"])
+        if word_key in word_keys:
+            gm.create_entity_edge(
+                "Word", word_key,
+                entity.collection, entity._key,
+                gm.cfg.edge_is_similar,
+                "IS_ENTITY",
+            )
+
+    # Inférer relations entre entités via dépendances syntaxiques
+    for rel in spacy_result.get("relations", []):
+        word_lower = rel["lemma"]
+        head_lower = rel["head_lemma"]
+        w_info = entity_map.get(word_lower)
+        h_info = entity_map.get(head_lower)
+        if w_info and h_info:
+            w_type, w_key = w_info
+            h_type, h_key = h_info
+            # WORKS_FOR: Person → Organization
+            if w_type == "Person" and h_type == "Organization":
+                gm.create_works_for(w_key, h_key)
+            elif w_type == "Organization" and h_type == "Person":
+                gm.create_works_for(h_key, w_key)
+            # LOCATED_IN: anything → Location
+            if h_type == "Location":
+                gm.create_located_in(w_type, w_key, h_key)
+            elif w_type == "Location":
+                gm.create_located_in(h_type, h_key, w_key)
+            # RELATED_TO: entities in same dependency
+            if w_type != h_type:
+                gm.create_related_to(w_type, w_key, h_type, h_key, weight=0.5)
+
+    # Co-occurrence d'entités dans les mêmes chunks → RELATED_TO
+    if entity_map:
+        seen_pairs = set()
+        for c in chunks:
+            chunk_entities = []
+            for e_text, (e_type, e_key) in entity_map.items():
+                if e_text in c["text"].lower():
+                    chunk_entities.append((e_type, e_key))
+            for i in range(len(chunk_entities)):
+                for j in range(i + 1, len(chunk_entities)):
+                    t1, k1 = chunk_entities[i]
+                    t2, k2 = chunk_entities[j]
+                    pair = (k1, k2) if k1 < k2 else (k2, k1)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        gm.create_related_to(t1, k1, t2, k2, weight=1.0)
 
     # Sentences
     for c in chunks:
@@ -449,6 +510,77 @@ def cmd_graph_top(args: argparse.Namespace):
     gm.close()
 
 
+def cmd_entities(args: argparse.Namespace):
+    """Lister les entités du graphe."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    entities = gm.get_entities(entity_type=args.type, limit=args.limit)
+
+    if not entities:
+        console.print("[yellow]Aucune entité trouvée.[/]")
+        return
+
+    table = Table(title=f"Entités ({args.type or 'tous'})")
+    table.add_column("Type", style="cyan")
+    table.add_column("Nom", style="white")
+    table.add_column("Mentions", style="yellow")
+    table.add_column("Détail", style="dim")
+    for e in entities:
+        detail = e.get("title") or e.get("loc_type") or e.get("domain") or ""
+        table.add_row(e.get("_type", ""), e.get("name", "")[:40],
+                       str(e.get("mentions", 0)), detail[:30])
+    console.print(table)
+    gm.close()
+
+
+def cmd_entity(args: argparse.Namespace):
+    """Afficher le détail d'une entité et son réseau."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    # Search entity by name across all entity collections
+    entities = gm.get_entities(limit=200)
+    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
+
+    if not matches:
+        console.print(f"[yellow]Aucune entité trouvée pour: {args.name}[/]")
+        return
+
+    for ent in matches:
+        e_type = ent.get("_type", "")
+        e_name = ent.get("name", "")
+        e_key = ent.get("_key", "")
+        console.print(Panel(f"[bold]{e_type}: {e_name}[/]"))
+
+        # Documents liés
+        docs = gm.get_entity_documents(e_type, e_key)
+        if docs:
+            console.print("  [cyan]Documents:[/]")
+            for d in docs:
+                console.print(f"    • {d.get('title', d['id'])}")
+
+        # Réseau de connexions
+        network = gm.get_entity_network(e_type, e_key, depth=args.depth)
+        if network:
+            console.print(f"  [cyan]Connexions (profondeur {args.depth}):[/]")
+            for n in network[:15]:
+                name = n.get("name", n.get("entity", ""))
+                rel = n.get("relation", "")
+                console.print(f"    → {name} [dim]({rel})[/]")
+        console.print("")
+
+    gm.close()
+
+
 def cmd_export(args: argparse.Namespace):
     """Exporter une session en JSON."""
     store = SQLiteStore()
@@ -572,61 +704,96 @@ def cmd_pipeline(args: argparse.Namespace):
     console.print(f"\n[bold green]Pipeline terminé ! Session ID: {session_id}[/]")
 
 
-def cmd_ingest(args: argparse.Namespace):
-    """Ingérer un document (PDF, TXT, DOCX) dans la base de mémoire."""
-    file_path = Path(args.file)
-    if not file_path.exists():
-        console.print(f"[red]Fichier introuvable: {file_path}[/]")
-        sys.exit(1)
+INGEST_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".docx"}
 
+
+def _ingest_file(file_path: Path, store: SQLiteStore, lang: str, build_graph: bool) -> str | None:
     from document.reader import chunk_text, get_metadata, read_file
+
+    try:
+        with console.status(f"[bold green]Lecture {file_path.name}..."):
+            text = read_file(file_path)
+        meta = get_metadata(file_path, text)
+        chunks = chunk_text(text)
+
+        session_id = store.create_session(
+            source=str(file_path),
+            language=lang,
+            model=f"document/{meta['file_type']}",
+        )
+        store.insert_chunks_batch(session_id, chunks)
+        store.insert_document(
+            session_id=session_id,
+            filename=str(file_path),
+            title=meta["title"],
+            author=meta["author"],
+            pages=meta["pages"],
+            file_type=meta["file_type"],
+            word_count=meta["word_count"],
+        )
+
+        _run_nlp_pipeline(
+            store, session_id, chunks, lang,
+            build_graph=build_graph,
+            doc_metadata=meta | {"filename": str(file_path)},
+        )
+        return session_id
+    except Exception as e:
+        console.print(f"  [red]✗ {file_path.name}: {e}[/]")
+        return None
+
+
+def cmd_ingest(args: argparse.Namespace):
+    """Ingérer un document ou un dossier de documents dans la base de mémoire."""
+    path = Path(args.file)
+    if not path.exists():
+        console.print(f"[red]Introuvable: {path}[/]")
+        sys.exit(1)
 
     store = SQLiteStore()
     store.connect()
-
     lang = args.language or "fr"
 
-    console.print(Panel(f"[bold yellow]Ingestion: {file_path.name}[/]"))
-    console.print(f"[yellow]Type:[/] {file_path.suffix.upper()} | [yellow]Langue:[/] {lang}")
+    if path.is_dir():
+        supported: list[Path] = []
+        for p in path.rglob("*") if args.recursive else path.glob("*"):
+            if p.suffix.lower() in INGEST_EXTENSIONS and p.is_file():
+                supported.append(p)
+        supported.sort()
 
-    with console.status("[bold green]Lecture du document...") as status:
-        text = read_file(file_path)
-    console.print(f"✓ {len(text)} caractères lus")
+        if not supported:
+            console.print(f"[yellow]Aucun document supporté trouvé dans {path}[/]")
+            console.print(f"[dim]Formats: {', '.join(sorted(INGEST_EXTENSIONS))}[/]")
+            sys.exit(0)
 
-    meta = get_metadata(file_path, text)
-    console.print(f"  Titre: {meta['title']}")
-    if meta['author']:
-        console.print(f"  Auteur: {meta['author']}")
-    if meta['pages']:
-        console.print(f"  Pages: {meta['pages']}")
-    console.print(f"  Mots: {meta['word_count']}")
+        console.print(Panel(f"[bold yellow]Dossier: {path}[/] ({len(supported)} fichiers)"))
+        console.print(f"[dim]Récursif: {'oui' if args.recursive else 'non'} | Langue: {lang}[/]\n")
 
-    chunks = chunk_text(text)
-    console.print(f"✓ {len(chunks)} chunks générés\n")
+        results: list[tuple[str, str | None]] = []
+        for i, fp in enumerate(supported, 1):
+            short = fp.relative_to(path) if args.recursive else fp.name
+            console.print(f"[{i}/{len(supported)}] {short}")
+            sid = _ingest_file(fp, store, lang, args.build_graph)
+            results.append((short, sid))
 
-    session_id = store.create_session(
-        source=str(file_path),
-        language=lang,
-        model=f"document/{meta['file_type']}",
-    )
-    store.insert_chunks_batch(session_id, chunks)
-    store.insert_document(
-        session_id=session_id,
-        filename=str(file_path),
-        title=meta["title"],
-        author=meta["author"],
-        pages=meta["pages"],
-        file_type=meta["file_type"],
-        word_count=meta["word_count"],
-    )
+        ok = sum(1 for _, s in results if s)
+        fail = len(results) - ok
 
-    _run_nlp_pipeline(
-        store, session_id, chunks, lang,
-        build_graph=args.build_graph,
-        doc_metadata=meta | {"filename": str(file_path)},
-    )
+        console.print(f"\n[bold]Résumé dossier:[/] {ok} ✓ / {fail} ✗")
+        if fail:
+            for name, sid in results:
+                if sid is None:
+                    console.print(f"  [red]✗ {name}[/]")
+    else:
+        if path.suffix.lower() not in INGEST_EXTENSIONS:
+            console.print(f"[red]Format non supporté: {path.suffix}[/]")
+            console.print(f"[dim]Supporté: {', '.join(sorted(INGEST_EXTENSIONS))}[/]")
+            sys.exit(1)
 
-    console.print(f"\n[bold green]✓ Document ingéré ! Session ID: {session_id}[/]")
+        console.print(Panel(f"[bold yellow]Ingestion: {path.name}[/]"))
+        sid = _ingest_file(path, store, lang, args.build_graph)
+        if sid:
+            console.print(f"\n[bold green]✓ Document ingéré ! Session ID: {sid}[/]")
 
 
 def main():
@@ -648,6 +815,19 @@ Exemples:
   python main.py ingest document.pdf --build-graph
   python main.py ingest notes.md --lang fr --build-graph
   python main.py ingest rapport.docx --build-graph
+
+  # Ingérer tout un dossier de documents
+  python main.py ingest ./documents/ --build-graph
+  python main.py ingest ./docs/ --recursive --build-graph
+
+  # Lister les entités du graphe
+  python main.py entities
+  python main.py entities --type Person
+  python main.py entities --type Organization
+
+  # Voir le réseau d'une entité
+  python main.py entity "Dr. Martin"
+  python main.py entity "Pasteur" --depth 3
 
   # Requêter le graphe ArangoDB
   python main.py graph query "FOR w IN Word SORT w.frequency DESC LIMIT 10 RETURN w"
@@ -692,9 +872,10 @@ Exemples:
 
     # ingest
     ingest_parser = subparsers.add_parser("ingest", help="Ingérer un document (PDF/TXT/DOCX/MD) dans la base mémoire")
-    ingest_parser.add_argument("file", help="Chemin du fichier document")
+    ingest_parser.add_argument("file", help="Chemin du fichier ou dossier")
     ingest_parser.add_argument("--language", "-l", default=None, help="Langue (défaut: fr)")
     ingest_parser.add_argument("--build-graph", action="store_true", help="Construire le graphe")
+    ingest_parser.add_argument("--recursive", "-r", action="store_true", help="Parcourir les sous-dossiers")
 
     # sessions
     subparsers.add_parser("sessions", help="Lister les sessions")
@@ -718,6 +899,17 @@ Exemples:
     graph_top = graph_sub.add_parser("top", help="Top mots du graphe")
     graph_top.add_argument("--limit", type=int, default=20, help="Nombre de mots")
 
+    # entities
+    entities_parser = subparsers.add_parser("entities", help="Lister les entités du graphe")
+    entities_parser.add_argument("--type", default=None, choices=["Person", "Organization", "Location", "Event"],
+                                 help="Type d'entité (défaut: tous)")
+    entities_parser.add_argument("--limit", type=int, default=50, help="Nombre max d'entités")
+
+    # entity
+    entity_parser = subparsers.add_parser("entity", help="Afficher le détail d'une entité")
+    entity_parser.add_argument("name", help="Nom de l'entité (recherche partielle)")
+    entity_parser.add_argument("--depth", type=int, default=2, help="Profondeur du réseau (défaut: 2)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -732,6 +924,8 @@ Exemples:
         "sessions": cmd_sessions,
         "show": cmd_show,
         "export": cmd_export,
+        "entities": cmd_entities,
+        "entity": cmd_entity,
     }
 
     cmd = commands.get(args.command)

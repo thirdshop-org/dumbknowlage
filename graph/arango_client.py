@@ -8,6 +8,14 @@ from arango.database import StandardDatabase
 from arango.exceptions import DatabaseCreateError
 
 from config import config
+from graph.entity_models import (
+    ENTITY_CLASSES,
+    EntityBase,
+    EventNode,
+    LocationNode,
+    OrganizationNode,
+    PersonNode,
+)
 from graph.models import Edge, WordNode, SentenceNode, TopicNode, DocumentNode, sanitize_key
 
 
@@ -37,12 +45,17 @@ class GraphManager:
                     raise ConnectionError(f"Impossible de connecter ArangoDB: {e}")
         return False
 
+    ENTITY_VERTEX_COLLECTIONS = ["Person", "Organization", "Location", "Event"]
+
+    ENTITY_EDGE_COLLECTIONS = ["appears_in", "works_for", "located_in", "related_to"]
+
     def _ensure_collections(self):
         vertex_collections = [
             self.cfg.word_collection,
             self.cfg.sentence_collection,
             self.cfg.topic_collection,
             self.cfg.document_collection,
+            *self.ENTITY_VERTEX_COLLECTIONS,
         ]
 
         edge_definitions = [
@@ -51,6 +64,7 @@ class GraphManager:
             self.cfg.edge_has_topic,
             self.cfg.edge_has_dependency,
             self.cfg.edge_is_similar,
+            *self.ENTITY_EDGE_COLLECTIONS,
         ]
 
         # Ensure vertex collections exist
@@ -58,7 +72,7 @@ class GraphManager:
             if not self._db.has_collection(col_name):
                 self._db.create_collection(col_name)
 
-        graph_name = "word_graph"
+        graph_name = "knowledge_graph"
         graphs = {g["name"]: g for g in self._db.graphs()}
 
         if graph_name in graphs:
@@ -120,6 +134,94 @@ class GraphManager:
         col = self.db.collection(self.cfg.document_collection)
         col.insert(doc.to_dict(), overwrite=True)
         return doc._key
+
+    # --- CRUD Entités ---
+
+    def upsert_entity(self, entity: EntityBase) -> str:
+        col = self.db.collection(entity.collection)
+        try:
+            existing = col.get(entity._key)
+            if existing:
+                col.update_match(
+                    {"_key": entity._key},
+                    {"mentions": existing["mentions"] + 1},
+                )
+                return entity._key
+        except Exception:
+            pass
+        col.insert(entity.to_dict(), overwrite=True)
+        return entity._key
+
+    def get_entities(self, entity_type: str | None = None,
+                     limit: int = 50) -> list[dict]:
+        collections = [entity_type] if entity_type else self.ENTITY_VERTEX_COLLECTIONS
+        results = []
+        for col_name in collections:
+            if not self._db.has_collection(col_name):
+                continue
+            col = self.db.collection(col_name)
+            for doc in col.all():
+                results.append({**doc, "_type": col_name})
+                if len(results) >= limit:
+                    return results
+        return results[:limit]
+
+    def get_entity_network(self, entity_type: str, entity_key: str,
+                           depth: int = 2) -> list[dict]:
+        start = f"{entity_type}/{entity_key}"
+        aql = f"""
+        FOR v, e IN 1..{depth} ANY '{start}'
+            GRAPH 'knowledge_graph'
+            LIMIT 100
+            RETURN {{entity: v._id, name: v.name || v.lemma, relation: e.relation_type || e._from}}
+        """
+        return self.query(aql)
+
+    # --- CRUD Arêtes d'entités ---
+
+    def create_entity_edge(self, from_type: str, from_key: str,
+                           to_type: str, to_key: str,
+                           edge_collection: str, relation_type: str = "",
+                           weight: float = 1.0):
+        edge = Edge(
+            collection=edge_collection,
+            _from=f"{from_type}/{from_key}",
+            _to=f"{to_type}/{to_key}",
+            relation_type=relation_type or edge_collection,
+            weight=weight,
+        )
+        self.insert_edge(edge)
+
+    def create_appears_in(self, entity_type: str, entity_key: str, doc_key: str):
+        self.create_entity_edge(
+            entity_type, entity_key,
+            self.cfg.document_collection, doc_key,
+            self.cfg.edge_appears_in,
+        )
+
+    def create_works_for(self, person_key: str, org_key: str):
+        self.create_entity_edge(
+            "Person", person_key,
+            "Organization", org_key,
+            self.cfg.edge_works_for,
+        )
+
+    def create_located_in(self, from_type: str, from_key: str, loc_key: str):
+        self.create_entity_edge(
+            from_type, from_key,
+            "Location", loc_key,
+            self.cfg.edge_located_in,
+        )
+
+    def create_related_to(self, from_type: str, from_key: str,
+                          to_type: str, to_key: str, weight: float = 1.0):
+        self.create_entity_edge(
+            from_type, from_key,
+            to_type, to_key,
+            self.cfg.edge_related_to,
+            relation_type="RELATED_TO",
+            weight=weight,
+        )
 
     # --- CRUD Arêtes ---
 
@@ -184,7 +286,7 @@ class GraphManager:
     def get_word_neighbors(self, lemma: str) -> list[dict]:
         aql = f"""
         FOR v, e IN 1..1 OUTBOUND '{self.cfg.word_collection}/{sanitize_key(lemma)}'
-            GRAPH 'word_graph'
+            GRAPH 'knowledge_graph'
             RETURN {{neighbor: v.lemma, relation: e.relation_type, weight: e.weight}}
         """
         return self.query(aql)
@@ -195,6 +297,15 @@ class GraphManager:
             SORT t.weight DESC
             LIMIT {limit}
             RETURN {{topic: t.label, weight: t.weight, keywords: t.keywords}}
+        """
+        return self.query(aql)
+
+    def get_entity_documents(self, entity_type: str, entity_key: str) -> list[dict]:
+        aql = f"""
+        FOR doc IN 1..1 INBOUND '{entity_type}/{entity_key}'
+            GRAPH 'knowledge_graph'
+            FILTER IS_SAME_COLLECTION(doc, '{self.cfg.document_collection}')
+            RETURN DISTINCT {{id: doc._key, title: doc.title, filename: doc.filename}}
         """
         return self.query(aql)
 

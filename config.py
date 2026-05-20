@@ -59,6 +59,10 @@ class ArangoConfig:
     edge_has_topic: str = "has_topic"
     edge_has_dependency: str = "has_dependency"
     edge_is_similar: str = "is_similar_to"
+    edge_appears_in: str = "appears_in"
+    edge_works_for: str = "works_for"
+    edge_located_in: str = "located_in"
+    edge_related_to: str = "related_to"
 
 
 @dataclass
