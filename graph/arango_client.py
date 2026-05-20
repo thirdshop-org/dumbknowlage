@@ -317,7 +317,7 @@ class GraphManager:
 
     def confirm_entity(self, entity_type: str, entity_key: str, source: str = "cli"):
         col = self.db.collection(entity_type)
-        col.update_match({"_key": entity_key}, {"confidence": 0.95})
+        col.update_match({"_key": entity_key}, {"confidence": 0.95, "user_feedback": 1.0})
         store = self.get_correction_store()
         ent = col.get(entity_key)
         name = ent.get("name", entity_key) if ent else entity_key
@@ -388,12 +388,12 @@ class GraphManager:
                     name=ent.get("name", ""),
                     label=col_name,
                     doc_count=ent.get("mentions", 1),
-                    user_feedback=0.0,
+                    user_feedback=ent.get("user_feedback", 0.0),
                     active_rules=rules,
                 )
                 new_conf = round(new_conf, 2)
 
-                if new_conf < 0.40:
+                if new_conf < 0.30:
                     if not dry_run:
                         col.delete(ent["_key"])
                         self._cleanup_entity_edges(col_name, ent["_key"])
@@ -469,6 +469,8 @@ class GraphManager:
                 self.db.aql.execute(aql, bind_vars={"old": old_id, "new": new_id})
             except Exception:
                 pass
+
+    def close(self):
         if self._client:
             self._client = None
             self._db = None

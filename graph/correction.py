@@ -84,7 +84,7 @@ class CorrectionStore:
 
     def upsert_rule(self, pattern_type: str, entity_label: str,
                     samples: int, rejection_rate: float) -> str:
-        key = f"rule/{pattern_type}/{entity_label.lower()}"
+        key = f"rule_{pattern_type}_{entity_label.lower()}"
         existing = self.rules.get(key)
         if existing:
             new_auto = rejection_rate > 0.7 and (existing.get("samples", 0) + samples >= 8)

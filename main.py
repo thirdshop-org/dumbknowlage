@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -788,8 +789,10 @@ def cmd_graph_corrections(args: argparse.Namespace):
     table.add_column("Type", style="green")
     table.add_column("Raison", style="yellow")
     for c in corrections:
+        ts = c.get("timestamp", 0)
+        dt = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if isinstance(ts, (int, float)) else str(ts)
         table.add_row(
-            c.get("timestamp", ""),
+            dt,
             c.get("action", ""),
             c.get("original_text", "")[:30],
             c.get("entity_type", ""),
@@ -1160,6 +1163,18 @@ Exemples:
     graph_top = graph_sub.add_parser("top", help="Top mots du graphe")
     graph_top.add_argument("--limit", type=int, default=20, help="Nombre de mots")
 
+    graph_reval = graph_sub.add_parser("revalidate", help="Revalider toutes les entités")
+    graph_reval.add_argument("--dry-run", action="store_true", help="Simulation seulement")
+
+    graph_clean = graph_sub.add_parser("cleanup", help="Nettoyer arêtes orphelines + révalider")
+    graph_clean.add_argument("--dry-run", action="store_true", help="Simulation seulement")
+    graph_clean.add_argument("--auto", action="store_true", help="Lancer aussi la revalidation")
+
+    graph_rules = graph_sub.add_parser("rules", help="Afficher les règles apprises")
+
+    graph_corr = graph_sub.add_parser("corrections", help="Afficher l'historique des corrections")
+    graph_corr.add_argument("--limit", type=int, default=20, help="Nombre de corrections")
+
     # entities
     entities_parser = subparsers.add_parser("entities", help="Lister les entités du graphe")
     entities_parser.add_argument("--type", default=None, choices=["Person", "Organization", "Location", "Event"],
@@ -1184,22 +1199,6 @@ Exemples:
     ent_rename = entity_sub.add_parser("rename", help="Renommer une entité")
     ent_rename.add_argument("name", help="Nom actuel")
     ent_rename.add_argument("new_name", help="Nouveau nom")
-
-    # graph
-    graph_parser = subparsers.add_parser("graph", help="Maintenance du graphe")
-    graph_sub = graph_parser.add_subparsers(dest="graph_command")
-
-    graph_reval = graph_sub.add_parser("revalidate", help="Revalider toutes les entités")
-    graph_reval.add_argument("--dry-run", action="store_true", help="Simulation seulement")
-
-    graph_clean = graph_sub.add_parser("cleanup", help="Nettoyer arêtes orphelines + révalider")
-    graph_clean.add_argument("--dry-run", action="store_true", help="Simulation seulement")
-    graph_clean.add_argument("--auto", action="store_true", help="Lancer aussi la revalidation")
-
-    graph_rules = graph_sub.add_parser("rules", help="Afficher les règles apprises")
-
-    graph_corr = graph_sub.add_parser("corrections", help="Afficher l'historique des corrections")
-    graph_corr.add_argument("--limit", type=int, default=20, help="Nombre de corrections")
 
     # rag
     rag_parser = subparsers.add_parser("rag", help="Commandes RAG (indexation, questions)")
@@ -1261,20 +1260,15 @@ Exemples:
             "cleanup": cmd_graph_cleanup,
             "rules": cmd_graph_rules,
             "corrections": cmd_graph_corrections,
+            "query": cmd_graph_query,
+            "top": cmd_graph_top,
         }
         fn = graph_dispatch.get(args.graph_command)
         if fn:
             fn(args)
         else:
-            console.print("[yellow]Utilisation: graph {revalidate|cleanup|rules|corrections} ...[/]")
+            console.print("[yellow]Utilisation: graph {revalidate|cleanup|rules|corrections|query|top} ...[/]")
         return
-    elif args.command == "graph":
-        if args.graph_command == "query":
-            cmd_graph_query(args)
-        elif args.graph_command == "top":
-            cmd_graph_top(args)
-        else:
-            graph_parser.print_help()
 
 
 if __name__ == "__main__":
