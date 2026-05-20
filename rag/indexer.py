@@ -31,6 +31,14 @@ def get_or_create_collection(client: chromadb.PersistentClient | None = None):
     )
 
 
+def _infer_source_type(source: str) -> str:
+    if source.startswith("microphone_"):
+        return "microphone"
+    if source.startswith("ocr_"):
+        return "ocr"
+    return "document"
+
+
 def index_all(force: bool = False) -> int:
     store = SQLiteStore()
     store.connect()
@@ -61,6 +69,7 @@ def index_all(force: bool = False) -> int:
                 "session_id": session_id,
                 "chunk_index": str(chunk["chunk_index"]),
                 "source": session["source"],
+                "source_type": _infer_source_type(session["source"]),
                 "created_at": session["created_at"],
             }
 
@@ -101,6 +110,7 @@ def index_session(session_id: str) -> int:
             "session_id": session_id,
             "chunk_index": str(chunk["chunk_index"]),
             "source": session["source"],
+            "source_type": _infer_source_type(session["source"]),
             "created_at": session["created_at"],
         }
         collection.upsert(ids=[chunk_id], embeddings=[embedding], metadatas=[metadata], documents=[text])

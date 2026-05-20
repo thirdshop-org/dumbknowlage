@@ -153,18 +153,47 @@ class GraphManager:
         return entity._key
 
     def get_entities(self, entity_type: str | None = None,
-                     limit: int = 50) -> list[dict]:
+                     limit: int = 50, offset: int = 0) -> list[dict]:
         collections = [entity_type] if entity_type else self.ENTITY_VERTEX_COLLECTIONS
         results = []
+        remaining = limit
+        skip = offset
         for col_name in collections:
             if not self._db.has_collection(col_name):
                 continue
-            col = self.db.collection(col_name)
-            for doc in col.all():
+            aql = f"""
+            FOR e IN {col_name}
+                LIMIT @skip, @limit
+                RETURN e
+            """
+            cursor = self.db.aql.execute(aql, bind_vars={"skip": skip, "limit": remaining})
+            col_results = []
+            for doc in cursor:
+                col_results.append({**doc, "_type": col_name})
+            results.extend(col_results)
+            remaining -= len(col_results)
+            skip = 0  # offset only applies to first collection
+            if remaining <= 0:
+                break
+        return results
+
+    def search_entities(self, name_query: str, limit: int = 50) -> list[dict]:
+        """Search entities by partial name match across all entity collections."""
+        results = []
+        pattern = f"%{name_query.lower()}%"
+        for col_name in self.ENTITY_VERTEX_COLLECTIONS:
+            if not self._db.has_collection(col_name):
+                continue
+            aql = f"""
+            FOR e IN {col_name}
+                FILTER LOWER(e.name) LIKE @pattern
+                LIMIT @limit
+                RETURN e
+            """
+            cursor = self.db.aql.execute(aql, bind_vars={"pattern": pattern, "limit": limit})
+            for doc in cursor:
                 results.append({**doc, "_type": col_name})
-                if len(results) >= limit:
-                    return results
-        return results[:limit]
+        return results
 
     def get_entity_network(self, entity_type: str, entity_key: str,
                            depth: int = 2) -> list[dict]:
@@ -334,7 +363,7 @@ class GraphManager:
         self._cleanup_entity_edges(entity_type, entity_key)
         store = self.get_correction_store()
         store.log_correction(name, entity_type, "denied", reason, source)
-        rules = store.get_recent_corrections(limit=20, action="denied")
+        rules = store.get_aggregated_denied()
         from graph.confidence import analyze_pattern
         pattern = analyze_pattern(rules)
         if pattern:

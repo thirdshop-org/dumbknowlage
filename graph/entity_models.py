@@ -10,11 +10,12 @@ ENTITY_CONFIDENCE_HIGH = 0.75
 class EntityBase:
     collection: str = ""
 
-    def __init__(self, name: str, mentions: int = 1, confidence: float = 0.5):
+    def __init__(self, name: str, mentions: int = 1, confidence: float = 0.5, user_feedback: float = 0.0):
         self._key = sanitize_key(name)
         self.name = name
         self.mentions = mentions
         self.confidence = round(confidence, 2)
+        self.user_feedback = user_feedback
 
     def to_dict(self) -> dict:
         return {
@@ -22,6 +23,7 @@ class EntityBase:
             "name": self.name,
             "mentions": self.mentions,
             "confidence": self.confidence,
+            "user_feedback": self.user_feedback,
         }
 
     @property
@@ -114,5 +116,5 @@ def entity_from_label(label: str, text: str,
         active_rules=active_rules or [],
     )
 
-    entity = cls(name=text, confidence=confidence)
+    entity = cls(name=text, confidence=confidence, user_feedback=user_feedback)
     return entity

@@ -95,36 +95,42 @@ def analyze_pattern(corrections: list[dict]) -> dict | None:
     if len(corrections) < 5:
         return None
 
+    total = len(corrections)
+    total_weighted = sum(c.get("samples", 1) for c in corrections)
+
     lowercase_long = [c for c in corrections
-                      if c.get("text", c.get("original_text", ""))[0].islower()
-                      and len(c.get("text", c.get("original_text", ""))) > 3]
-    if len(lowercase_long) >= max(3, len(corrections) * 0.5):
+                      if c.get("original_text", "")[0].islower()
+                      and len(c.get("original_text", "")) > 3]
+    ll_weight = sum(c.get("samples", 1) for c in lowercase_long)
+    if len(lowercase_long) >= max(3, total * 0.5):
         return {
             "pattern_type": "lowercase_word_over_3_chars",
             "entity_label": _most_common_label(corrections),
-            "samples": len(lowercase_long),
-            "rejection_rate": len(lowercase_long) / len(corrections),
+            "samples": ll_weight,
+            "rejection_rate": ll_weight / total_weighted if total_weighted else 1.0,
         }
 
     short_words = [c for c in corrections
-                   if 1 < len(c.get("text", c.get("original_text", ""))) <= 3]
-    if len(short_words) >= max(3, len(corrections) * 0.5):
+                   if 1 < len(c.get("original_text", "")) <= 3]
+    sw_weight = sum(c.get("samples", 1) for c in short_words)
+    if len(short_words) >= max(3, total * 0.5):
         return {
             "pattern_type": "short_word",
             "entity_label": _most_common_label(corrections),
-            "samples": len(short_words),
-            "rejection_rate": len(short_words) / len(corrections),
+            "samples": sw_weight,
+            "rejection_rate": sw_weight / total_weighted if total_weighted else 1.0,
         }
 
     special_chars = [c for c in corrections
-                     if any(ch in c.get("text", c.get("original_text", ""))
+                     if any(ch in c.get("original_text", "")
                             for ch in "{}|=$/\\<>")]
+    sc_weight = sum(c.get("samples", 1) for c in special_chars)
     if special_chars:
         return {
             "pattern_type": "contains_special_chars",
             "entity_label": _most_common_label(corrections),
-            "samples": len(special_chars),
-            "rejection_rate": len(special_chars) / len(corrections),
+            "samples": sc_weight,
+            "rejection_rate": sc_weight / total_weighted if total_weighted else 1.0,
         }
 
     return None

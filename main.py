@@ -546,7 +546,7 @@ def cmd_entities(args: argparse.Namespace):
         console.print("[red]Impossible de connecter ArangoDB.[/]")
         return
 
-    entities = gm.get_entities(entity_type=args.type, limit=args.limit)
+    entities = gm.get_entities(entity_type=args.type, limit=args.limit, offset=args.offset)
 
     if not entities:
         console.print("[yellow]Aucune entité trouvée.[/]")
@@ -575,8 +575,7 @@ def cmd_entity(args: argparse.Namespace):
         return
 
     # Search entity by name across all entity collections
-    entities = gm.get_entities(limit=200)
-    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
+    entities = gm.search_entities(args.name, limit=50)
 
     if not matches:
         console.print(f"[yellow]Aucune entité trouvée pour: {args.name}[/]")
@@ -617,13 +616,12 @@ def cmd_entity_confirm(args: argparse.Namespace):
         console.print("[red]Impossible de connecter ArangoDB.[/]")
         return
 
-    entities = gm.get_entities(limit=200)
-    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
-    if not matches:
+    entities = gm.search_entities(args.name, limit=50)
+    if not entities:
         console.print(f"[yellow]Aucune entité trouvée: {args.name}[/]")
         return
 
-    for ent in matches:
+    for ent in entities:
         e_type = ent.get("_type", "")
         e_key = ent.get("_key", "")
         gm.confirm_entity(e_type, e_key)
@@ -641,13 +639,12 @@ def cmd_entity_deny(args: argparse.Namespace):
         console.print("[red]Impossible de connecter ArangoDB.[/]")
         return
 
-    entities = gm.get_entities(limit=200)
-    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
-    if not matches:
+    entities = gm.search_entities(args.name, limit=50)
+    if not entities:
         console.print(f"[yellow]Aucune entité trouvée: {args.name}[/]")
         return
 
-    for ent in matches:
+    for ent in entities:
         e_type = ent.get("_type", "")
         e_key = ent.get("_key", "")
         gm.deny_entity(e_type, e_key, reason=args.reason)
@@ -665,13 +662,12 @@ def cmd_entity_rename(args: argparse.Namespace):
         console.print("[red]Impossible de connecter ArangoDB.[/]")
         return
 
-    entities = gm.get_entities(limit=200)
-    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
-    if not matches:
+    entities = gm.search_entities(args.name, limit=50)
+    if not entities:
         console.print(f"[yellow]Aucune entité trouvée: {args.name}[/]")
         return
 
-    for ent in matches:
+    for ent in entities:
         e_type = ent.get("_type", "")
         e_key = ent.get("_key", "")
         gm.rename_entity(e_type, e_key, args.new_name)
@@ -1180,6 +1176,7 @@ Exemples:
     entities_parser.add_argument("--type", default=None, choices=["Person", "Organization", "Location", "Event"],
                                  help="Type d'entité (défaut: tous)")
     entities_parser.add_argument("--limit", type=int, default=50, help="Nombre max d'entités")
+    entities_parser.add_argument("--offset", type=int, default=0, help="Nombre d'entités à sauter")
 
     # entity
     entity_parser = subparsers.add_parser("entity", help="Commandes entité")

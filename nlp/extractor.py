@@ -9,7 +9,7 @@ from config import config
 
 
 def extract_frequencies(tokens: list[dict], field: str = "lemma") -> list[tuple[str, int]]:
-    words = [t[field] for t in tokens if not t.get("is_punct", False) and not t.get("is_stop", False)]
+    words = [t[field] for t in tokens if not t.get("is_punct", False) and not t.get("is_stop", False) and t.get(field, "").strip()]
     counter = Counter(words)
     return counter.most_common(config.extraction.top_n_frequencies)
 
@@ -20,7 +20,10 @@ def extract_co_occurrences(
     field: str = "lemma",
 ) -> list[tuple[tuple[str, str], int]]:
     w = window or config.extraction.co_occurrence_window
-    words = [t[field] for t in tokens if not t.get("is_punct", False) and not t.get("is_stop", False)]
+    words = [t[field] for t in tokens
+             if not t.get("is_punct", False)
+             and not t.get("is_stop", False)
+             and t.get(field, "").strip()]
     co_occur: dict[tuple[str, str], int] = defaultdict(int)
     for i in range(len(words)):
         for j in range(i + 1, min(i + w + 1, len(words))):

@@ -41,26 +41,48 @@ class HybridRetriever:
         k = top_k or config.rag.top_k
         question_emb = self.embedder.embed(question)
 
-        results = self.collection.query(
-            query_embeddings=[question_emb],
-            n_results=k,
-        )
+        source_types = ["document", "microphone", "ocr"]
+        per_type = max(1, k // len(source_types))
+        seen_ids: set[str] = set()
+        all_chunks: list[ChunkResult] = []
 
-        chunks = []
-        for i in range(len(results["ids"][0])):
-            score = results["distances"][0][i] if results["distances"] else 0.0
-            chunk = ChunkResult(
-                id=results["ids"][0][i],
-                score=1.0 - score,
-                text=results["documents"][0][i],
-                metadata=results["metadatas"][0][i] if results["metadatas"] else {},
+        for st in source_types:
+            results = self.collection.query(
+                query_embeddings=[question_emb],
+                n_results=per_type * 2,
+                where={"source_type": st},
             )
-            chunks.append(chunk)
+            for i in range(len(results["ids"][0])):
+                cid = results["ids"][0][i]
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                score = results["distances"][0][i] if results["distances"] else 0.0
+                all_chunks.append(ChunkResult(
+                    id=cid,
+                    score=1.0 - score,
+                    text=results["documents"][0][i],
+                    metadata=results["metadatas"][0][i] if results["metadatas"] else {},
+                ))
 
-        result = RetrievalResult(chunks=chunks)
+        # Interleave by source type (round-robin)
+        by_type: dict[str, list[ChunkResult]] = {}
+        for c in all_chunks:
+            st = c.metadata.get("source_type", "document")
+            by_type.setdefault(st, []).append(c)
+
+        interleaved: list[ChunkResult] = []
+        while any(by_type.values()):
+            for st in source_types:
+                if by_type.get(st):
+                    interleaved.append(by_type[st].pop(0))
+
+        final = interleaved[:k]
+
+        result = RetrievalResult(chunks=final)
 
         if config.rag.use_graph_enrichment:
-            result.graph_context = self._enrich_with_graph(chunks)
+            result.graph_context = self._enrich_with_graph(final)
 
         return result
 
@@ -135,19 +157,39 @@ class HybridRetriever:
         k = top_k or config.rag.top_k
         question_emb = self.embedder.embed(question)
 
-        results = self.collection.query(
-            query_embeddings=[question_emb],
-            n_results=k,
-        )
+        source_types = ["document", "microphone", "ocr"]
+        per_type = max(1, k // len(source_types))
+        seen_ids: set[str] = set()
+        all_chunks: list[ChunkResult] = []
 
-        chunks = []
-        for i in range(len(results["ids"][0])):
-            score = results["distances"][0][i] if results["distances"] else 0.0
-            chunk = ChunkResult(
-                id=results["ids"][0][i],
-                score=1.0 - score,
-                text=results["documents"][0][i],
-                metadata=results["metadatas"][0][i] if results["metadatas"] else {},
+        for st in source_types:
+            results = self.collection.query(
+                query_embeddings=[question_emb],
+                n_results=per_type * 2,
+                where={"source_type": st},
             )
-            chunks.append(chunk)
-        return chunks
+            for i in range(len(results["ids"][0])):
+                cid = results["ids"][0][i]
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                score = results["distances"][0][i] if results["distances"] else 0.0
+                all_chunks.append(ChunkResult(
+                    id=cid,
+                    score=1.0 - score,
+                    text=results["documents"][0][i],
+                    metadata=results["metadatas"][0][i] if results["metadatas"] else {},
+                ))
+
+        by_type: dict[str, list[ChunkResult]] = {}
+        for c in all_chunks:
+            st = c.metadata.get("source_type", "document")
+            by_type.setdefault(st, []).append(c)
+
+        interleaved: list[ChunkResult] = []
+        while any(by_type.values()):
+            for st in source_types:
+                if by_type.get(st):
+                    interleaved.append(by_type[st].pop(0))
+
+        return interleaved[:k]

@@ -135,3 +135,16 @@ class CorrectionStore:
             "auto_denied": actions.get("auto_denied", 0),
             "rules": len(self.get_rules()),
         }
+
+    def get_aggregated_denied(self) -> list[dict]:
+        """Aggregate all denied corrections by (original_text, entity_type)."""
+        aql = """
+        FOR c IN EntityCorrection
+            FILTER c.action == "denied"
+            COLLECT text = c.original_text, type = c.entity_type
+            AGGREGATE count = COUNT(1)
+            SORT count DESC
+            RETURN {original_text: text, entity_type: type, samples: count}
+        """
+        cursor = self._db.aql.execute(aql)
+        return [doc for doc in cursor]
