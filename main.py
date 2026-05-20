@@ -331,8 +331,16 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
     # --- Entités typées ---
     entity_map: dict[str, tuple[str, str]] = {}  # text_lower → (type, key)
 
+    active_rules: list[dict] = []
+    try:
+        store = gm.get_correction_store()
+        active_rules = store.get_rules(auto_apply_only=True)
+    except Exception:
+        pass
+
     for ent in spacy_result["entities"]:
-        entity = entity_from_label(ent["label"], ent["text"])
+        entity = entity_from_label(ent["label"], ent["text"],
+                                   active_rules=active_rules)
         if entity is None:
             continue
         gm.upsert_entity(entity)
@@ -596,6 +604,198 @@ def cmd_entity(args: argparse.Namespace):
                 console.print(f"    → {name} [dim]({rel})[/]")
         console.print("")
 
+    gm.close()
+
+
+def cmd_entity_confirm(args: argparse.Namespace):
+    """Confirmer une entité comme valide."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    entities = gm.get_entities(limit=200)
+    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
+    if not matches:
+        console.print(f"[yellow]Aucune entité trouvée: {args.name}[/]")
+        return
+
+    for ent in matches:
+        e_type = ent.get("_type", "")
+        e_key = ent.get("_key", "")
+        gm.confirm_entity(e_type, e_key)
+        console.print(f"[green]✓ Confirmé[/] {e_type}: {ent.get('name', '')} (confiance: 0.95)")
+
+    gm.close()
+
+
+def cmd_entity_deny(args: argparse.Namespace):
+    """Refuser une entité (suppression + apprentissage)."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    entities = gm.get_entities(limit=200)
+    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
+    if not matches:
+        console.print(f"[yellow]Aucune entité trouvée: {args.name}[/]")
+        return
+
+    for ent in matches:
+        e_type = ent.get("_type", "")
+        e_key = ent.get("_key", "")
+        gm.deny_entity(e_type, e_key, reason=args.reason)
+        console.print(f"[red]✗ Refusée[/] {e_type}: {ent.get('name', '')}")
+
+    gm.close()
+
+
+def cmd_entity_rename(args: argparse.Namespace):
+    """Renommer une entité."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    entities = gm.get_entities(limit=200)
+    matches = [e for e in entities if args.name.lower() in e.get("name", "").lower()]
+    if not matches:
+        console.print(f"[yellow]Aucune entité trouvée: {args.name}[/]")
+        return
+
+    for ent in matches:
+        e_type = ent.get("_type", "")
+        e_key = ent.get("_key", "")
+        gm.rename_entity(e_type, e_key, args.new_name)
+        console.print(f"[green]✓ Renommée[/] {ent.get('name', '')} → {args.new_name}")
+
+    gm.close()
+
+
+def cmd_graph_revalidate(args: argparse.Namespace):
+    """Revalider toutes les entités (recalcul des scores)."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    stats = gm.revalidate_entities(dry_run=args.dry_run)
+    console.print(f"[cyan]Revalidation ({'dry-run' if args.dry_run else 'réelle'}):[/]")
+    console.print(f"  Scannées: {stats['scanned']}")
+    console.print(f"  Mises à jour: {stats['updated']}")
+    console.print(f"  Supprimées: {stats['deleted']}")
+    gm.close()
+
+
+def cmd_graph_cleanup(args: argparse.Namespace):
+    """Nettoyer les arêtes orphelines + entités invalides."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    edge_stats = gm.cleanup_dangling_edges(dry_run=args.dry_run)
+    console.print(f"[cyan]Arêtes orphelines ({'dry-run' if args.dry_run else 'nettoyées'}):[/]")
+    console.print(f"  Scannées: {edge_stats['scanned']}")
+    console.print(f"  Supprimées: {edge_stats['deleted']}")
+
+    if not args.auto:
+        gm.close()
+        return
+
+    reval_stats = gm.revalidate_entities(dry_run=args.dry_run)
+    console.print(f"[cyan]Entités revalidées:[/]")
+    console.print(f"  Scannées: {reval_stats['scanned']}")
+    console.print(f"  Mises à jour: {reval_stats['updated']}")
+    console.print(f"  Supprimées: {reval_stats['deleted']}")
+    gm.close()
+
+
+def cmd_graph_rules(args: argparse.Namespace):
+    """Afficher les règles apprises."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    store = gm.get_correction_store()
+    rules = store.get_rules()
+    if not rules:
+        console.print("[yellow]Aucune règle apprise.[/]")
+        return
+
+    table = Table(title="Règles apprises")
+    table.add_column("Pattern", style="cyan")
+    table.add_column("Label", style="green")
+    table.add_column("Échantillons", style="yellow")
+    table.add_column("Rejet", style="red")
+    table.add_column("Auto", style="blue")
+    for r in rules:
+        table.add_row(
+            r.get("pattern_type", ""),
+            r.get("entity_label", ""),
+            str(r.get("samples", 0)),
+            f"{r.get('rejection_rate', 0):.0%}",
+            "✓" if r.get("auto_apply") else "✗",
+        )
+    console.print(table)
+    gm.close()
+
+
+def cmd_graph_corrections(args: argparse.Namespace):
+    """Afficher l'historique des corrections."""
+    from graph.arango_client import GraphManager
+
+    gm = GraphManager()
+    if not gm.connect():
+        console.print("[red]Impossible de connecter ArangoDB.[/]")
+        return
+
+    store = gm.get_correction_store()
+    corrections = store.get_recent_corrections(limit=args.limit)
+    if not corrections:
+        console.print("[yellow]Aucune correction.[/]")
+        return
+
+    stats = store.get_correction_stats()
+    console.print(Panel(
+        f"[bold]Stats corrections[/] | "
+        f"Total: {stats['total']} | "
+        f"Confirmées: {stats['confirmed']} | "
+        f"Refusées: {stats['denied']} | "
+        f"Renommées: {stats['renamed']} | "
+        f"Auto-refusées: {stats['auto_denied']} | "
+        f"Règles: {stats['rules']}",
+    ))
+
+    table = Table(title=f"Dernières corrections ({args.limit})")
+    table.add_column("Date", style="dim")
+    table.add_column("Action", style="cyan")
+    table.add_column("Texte", style="white")
+    table.add_column("Type", style="green")
+    table.add_column("Raison", style="yellow")
+    for c in corrections:
+        table.add_row(
+            c.get("timestamp", ""),
+            c.get("action", ""),
+            c.get("original_text", "")[:30],
+            c.get("entity_type", ""),
+            c.get("reason", "")[:20],
+        )
+    console.print(table)
     gm.close()
 
 
@@ -967,9 +1167,39 @@ Exemples:
     entities_parser.add_argument("--limit", type=int, default=50, help="Nombre max d'entités")
 
     # entity
-    entity_parser = subparsers.add_parser("entity", help="Afficher le détail d'une entité")
-    entity_parser.add_argument("name", help="Nom de l'entité (recherche partielle)")
-    entity_parser.add_argument("--depth", type=int, default=2, help="Profondeur du réseau (défaut: 2)")
+    entity_parser = subparsers.add_parser("entity", help="Commandes entité")
+    entity_sub = entity_parser.add_subparsers(dest="entity_command")
+
+    ent_show = entity_sub.add_parser("show", help="Afficher le détail d'une entité")
+    ent_show.add_argument("name", help="Nom de l'entité (recherche partielle)")
+    ent_show.add_argument("--depth", type=int, default=2, help="Profondeur du réseau (défaut: 2)")
+
+    ent_confirm = entity_sub.add_parser("confirm", help="Confirmer une entité comme valide")
+    ent_confirm.add_argument("name", help="Nom de l'entité")
+
+    ent_deny = entity_sub.add_parser("deny", help="Refuser une entité (suppression)")
+    ent_deny.add_argument("name", help="Nom de l'entité")
+    ent_deny.add_argument("--reason", "-r", default="", help="Raison du refus")
+
+    ent_rename = entity_sub.add_parser("rename", help="Renommer une entité")
+    ent_rename.add_argument("name", help="Nom actuel")
+    ent_rename.add_argument("new_name", help="Nouveau nom")
+
+    # graph
+    graph_parser = subparsers.add_parser("graph", help="Maintenance du graphe")
+    graph_sub = graph_parser.add_subparsers(dest="graph_command")
+
+    graph_reval = graph_sub.add_parser("revalidate", help="Revalider toutes les entités")
+    graph_reval.add_argument("--dry-run", action="store_true", help="Simulation seulement")
+
+    graph_clean = graph_sub.add_parser("cleanup", help="Nettoyer arêtes orphelines + révalider")
+    graph_clean.add_argument("--dry-run", action="store_true", help="Simulation seulement")
+    graph_clean.add_argument("--auto", action="store_true", help="Lancer aussi la revalidation")
+
+    graph_rules = graph_sub.add_parser("rules", help="Afficher les règles apprises")
+
+    graph_corr = graph_sub.add_parser("corrections", help="Afficher l'historique des corrections")
+    graph_corr.add_argument("--limit", type=int, default=20, help="Nombre de corrections")
 
     # rag
     rag_parser = subparsers.add_parser("rag", help="Commandes RAG (indexation, questions)")
@@ -1002,7 +1232,6 @@ Exemples:
         "show": cmd_show,
         "export": cmd_export,
         "entities": cmd_entities,
-        "entity": cmd_entity,
         "rag": cmd_rag,
         "mcp": cmd_mcp,
     }
@@ -1010,6 +1239,35 @@ Exemples:
     cmd = commands.get(args.command)
     if cmd:
         cmd(args)
+        return
+
+    if args.command == "entity":
+        entity_dispatch = {
+            "show": cmd_entity,
+            "confirm": cmd_entity_confirm,
+            "deny": cmd_entity_deny,
+            "rename": cmd_entity_rename,
+        }
+        fn = entity_dispatch.get(args.entity_command)
+        if fn:
+            fn(args)
+        else:
+            console.print("[yellow]Utilisation: entity {show|confirm|deny|rename} ...[/]")
+        return
+
+    if args.command == "graph":
+        graph_dispatch = {
+            "revalidate": cmd_graph_revalidate,
+            "cleanup": cmd_graph_cleanup,
+            "rules": cmd_graph_rules,
+            "corrections": cmd_graph_corrections,
+        }
+        fn = graph_dispatch.get(args.graph_command)
+        if fn:
+            fn(args)
+        else:
+            console.print("[yellow]Utilisation: graph {revalidate|cleanup|rules|corrections} ...[/]")
+        return
     elif args.command == "graph":
         if args.graph_command == "query":
             cmd_graph_query(args)

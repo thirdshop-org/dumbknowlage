@@ -309,7 +309,166 @@ class GraphManager:
         """
         return self.query(aql)
 
-    def close(self):
+    # --- Corrections et feedback ---
+
+    def get_correction_store(self):
+        from graph.correction import CorrectionStore
+        return CorrectionStore(self.db)
+
+    def confirm_entity(self, entity_type: str, entity_key: str, source: str = "cli"):
+        col = self.db.collection(entity_type)
+        col.update_match({"_key": entity_key}, {"confidence": 0.95})
+        store = self.get_correction_store()
+        ent = col.get(entity_key)
+        name = ent.get("name", entity_key) if ent else entity_key
+        store.log_correction(name, entity_type, "confirmed", source=source)
+
+    def deny_entity(self, entity_type: str, entity_key: str,
+                    reason: str = "", source: str = "cli"):
+        col = self.db.collection(entity_type)
+        ent = col.get(entity_key)
+        if not ent:
+            return
+        name = ent.get("name", entity_key)
+        col.delete(entity_key)
+        self._cleanup_entity_edges(entity_type, entity_key)
+        store = self.get_correction_store()
+        store.log_correction(name, entity_type, "denied", reason, source)
+        rules = store.get_recent_corrections(limit=20, action="denied")
+        from graph.confidence import analyze_pattern
+        pattern = analyze_pattern(rules)
+        if pattern:
+            store.upsert_rule(**pattern)
+            store.log_correction(
+                name, entity_type, "rule_created",
+                f"auto-rule: {pattern['pattern_type']}",
+                source="system",
+            )
+
+    def rename_entity(self, entity_type: str, old_key: str, new_name: str):
+        col = self.db.collection(entity_type)
+        ent = col.get(old_key)
+        if not ent:
+            return
+        from graph.entity_models import EntityBase
+        from graph.confidence import compute_name_structure_score
+        new_key = EntityBase(new_name)._key
+        if new_key == old_key:
+            col.update_match({"_key": old_key}, {"name": new_name})
+            return
+        new_conf = compute_name_structure_score(new_name, entity_type)
+        col.insert({
+            "_key": new_key,
+            "name": new_name,
+            "mentions": ent.get("mentions", 1),
+            "confidence": max(ent.get("confidence", 0.5), new_conf),
+        }, overwrite=True)
+        self._repoint_entity_edges(entity_type, old_key, entity_type, new_key)
+        col.delete(old_key)
+        store = self.get_correction_store()
+        old_name = ent.get("name", old_key)
+        store.log_correction(
+            old_name, entity_type, "renamed",
+            f"→ {new_name}", source="cli",
+        )
+
+    def revalidate_entities(self, dry_run: bool = False) -> dict:
+        stats: dict[str, int] = {"scanned": 0, "deleted": 0, "updated": 0, "deleted_edges": 0}
+        store = self.get_correction_store()
+        rules = store.get_rules(auto_apply_only=True)
+
+        for col_name in self.ENTITY_VERTEX_COLLECTIONS:
+            if not self._db.has_collection(col_name):
+                continue
+            col = self.db.collection(col_name)
+            for ent in col.all():
+                stats["scanned"] += 1
+                from graph.confidence import compute_confidence
+                new_conf = compute_confidence(
+                    name=ent.get("name", ""),
+                    label=col_name,
+                    doc_count=ent.get("mentions", 1),
+                    user_feedback=0.0,
+                    active_rules=rules,
+                )
+                new_conf = round(new_conf, 2)
+
+                if new_conf < 0.40:
+                    if not dry_run:
+                        col.delete(ent["_key"])
+                        self._cleanup_entity_edges(col_name, ent["_key"])
+                        stats["deleted"] += 1
+                else:
+                    if not dry_run:
+                        col.update_match({"_key": ent["_key"]}, {"confidence": new_conf})
+                        stats["updated"] += 1
+
+        return stats
+
+    def cleanup_dangling_edges(self, dry_run: bool = False) -> dict:
+        edge_cols = [
+            self.cfg.edge_appears_in,
+            self.cfg.edge_works_for,
+            self.cfg.edge_located_in,
+            self.cfg.edge_related_to,
+        ]
+        stats: dict[str, int] = {"scanned": 0, "deleted": 0}
+        for ec in edge_cols:
+            if not self._db.has_collection(ec):
+                continue
+            aql = f"""
+            FOR e IN {ec}
+                LET from_exists = DOCUMENT(e._from)
+                LET to_exists = DOCUMENT(e._to)
+                FILTER from_exists == null OR to_exists == null
+                RETURN e._key
+            """
+            cursor = self.db.aql.execute(aql)
+            for doc in cursor:
+                stats["scanned"] += 1
+                if not dry_run:
+                    self.db.collection(ec).delete(doc, ignore_missing=True)
+                    stats["deleted"] += 1
+        return stats
+
+    def _cleanup_entity_edges(self, entity_type: str, entity_key: str):
+        start = f"{entity_type}/{entity_key}"
+        for ec in [self.cfg.edge_appears_in, self.cfg.edge_works_for,
+                    self.cfg.edge_located_in, self.cfg.edge_related_to,
+                    self.cfg.edge_is_similar]:
+            if not self._db.has_collection(ec):
+                continue
+            aql = f"""
+            FOR e IN {ec}
+                FILTER e._from == @start OR e._to == @start
+                REMOVE e IN {ec}
+            """
+            try:
+                self.db.aql.execute(aql, bind_vars={"start": start})
+            except Exception:
+                pass
+
+    def _repoint_entity_edges(self, from_type: str, from_key: str,
+                               to_type: str, to_key: str):
+        old_id = f"{from_type}/{from_key}"
+        new_id = f"{to_type}/{to_key}"
+        for ec in [self.cfg.edge_appears_in, self.cfg.edge_works_for,
+                    self.cfg.edge_located_in, self.cfg.edge_related_to,
+                    self.cfg.edge_is_similar]:
+            if not self._db.has_collection(ec):
+                continue
+            aql = f"""
+            FOR e IN {ec}
+                FILTER e._from == @old OR e._to == @old
+                UPDATE e._key WITH {{
+                    _from: e._from == @old ? @new : e._from,
+                    _to: e._to == @old ? @new : e._to
+                }} IN {ec}
+            """
+            try:
+                self.db.aql.execute(aql, bind_vars={"old": old_id, "new": new_id})
+            except Exception:
+                pass
         if self._client:
             self._client = None
             self._db = None

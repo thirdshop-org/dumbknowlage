@@ -102,7 +102,15 @@ class HybridRetriever:
                 try:
                     from graph.entity_models import sanitize_key, entity_from_label
 
-                    entity = entity_from_label(ent["label"], ent["text"])
+                    active_rules: list[dict] = []
+                    try:
+                        store = gm.get_correction_store()
+                        active_rules = store.get_rules(auto_apply_only=True)
+                    except Exception:
+                        pass
+
+                    entity = entity_from_label(ent["label"], ent["text"],
+                                               active_rules=active_rules)
                     if entity is None:
                         continue
 

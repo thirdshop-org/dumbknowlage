@@ -3,27 +3,41 @@ from __future__ import annotations
 from graph.models import sanitize_key
 
 
+ENTITY_CONFIDENCE_LOW = 0.40
+ENTITY_CONFIDENCE_HIGH = 0.75
+
+
 class EntityBase:
     collection: str = ""
 
-    def __init__(self, name: str, mentions: int = 1):
+    def __init__(self, name: str, mentions: int = 1, confidence: float = 0.5):
         self._key = sanitize_key(name)
         self.name = name
         self.mentions = mentions
+        self.confidence = round(confidence, 2)
 
     def to_dict(self) -> dict:
         return {
             "_key": self._key,
             "name": self.name,
             "mentions": self.mentions,
+            "confidence": self.confidence,
         }
+
+    @property
+    def needs_review(self) -> bool:
+        return ENTITY_CONFIDENCE_LOW <= self.confidence < ENTITY_CONFIDENCE_HIGH
+
+    @property
+    def is_valid(self) -> bool:
+        return self.confidence >= ENTITY_CONFIDENCE_LOW
 
 
 class PersonNode(EntityBase):
     collection = "Person"
 
-    def __init__(self, name: str, title: str = "", mentions: int = 1):
-        super().__init__(name, mentions)
+    def __init__(self, name: str, title: str = "", mentions: int = 1, confidence: float = 0.5):
+        super().__init__(name, mentions, confidence)
         self.title = title
 
     def to_dict(self) -> dict:
@@ -35,8 +49,8 @@ class PersonNode(EntityBase):
 class OrganizationNode(EntityBase):
     collection = "Organization"
 
-    def __init__(self, name: str, domain: str = "", mentions: int = 1):
-        super().__init__(name, mentions)
+    def __init__(self, name: str, domain: str = "", mentions: int = 1, confidence: float = 0.5):
+        super().__init__(name, mentions, confidence)
         self.domain = domain
 
     def to_dict(self) -> dict:
@@ -48,8 +62,8 @@ class OrganizationNode(EntityBase):
 class LocationNode(EntityBase):
     collection = "Location"
 
-    def __init__(self, name: str, loc_type: str = "", mentions: int = 1):
-        super().__init__(name, mentions)
+    def __init__(self, name: str, loc_type: str = "", mentions: int = 1, confidence: float = 0.5):
+        super().__init__(name, mentions, confidence)
         self.loc_type = loc_type
 
     def to_dict(self) -> dict:
@@ -61,8 +75,8 @@ class LocationNode(EntityBase):
 class EventNode(EntityBase):
     collection = "Event"
 
-    def __init__(self, name: str, date: str = "", mentions: int = 1):
-        super().__init__(name, mentions)
+    def __init__(self, name: str, date: str = "", mentions: int = 1, confidence: float = 0.5):
+        super().__init__(name, mentions, confidence)
         self.date = date
 
     def to_dict(self) -> dict:
@@ -82,8 +96,23 @@ ENTITY_CLASSES = {
 }
 
 
-def entity_from_label(label: str, text: str) -> EntityBase | None:
+def entity_from_label(label: str, text: str,
+                      doc_count: int = 1,
+                      user_feedback: float = 0.0,
+                      context_entities: int = 0,
+                      active_rules: list[dict] | None = None) -> EntityBase | None:
     cls = ENTITY_CLASSES.get(label.upper())
     if cls is None:
         return None
-    return cls(name=text)
+
+    from graph.confidence import compute_confidence
+    confidence = compute_confidence(
+        name=text, label=label,
+        doc_count=doc_count,
+        user_feedback=user_feedback,
+        context_entities=context_entities,
+        active_rules=active_rules or [],
+    )
+
+    entity = cls(name=text, confidence=confidence)
+    return entity
