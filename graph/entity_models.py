@@ -38,8 +38,8 @@ class EntityBase:
 class PersonNode(EntityBase):
     collection = "Person"
 
-    def __init__(self, name: str, title: str = "", mentions: int = 1, confidence: float = 0.5):
-        super().__init__(name, mentions, confidence)
+    def __init__(self, name: str, title: str = "", mentions: int = 1, confidence: float = 0.5, user_feedback: float = 0.0):
+        super().__init__(name, mentions, confidence, user_feedback)
         self.title = title
 
     def to_dict(self) -> dict:
@@ -51,8 +51,8 @@ class PersonNode(EntityBase):
 class OrganizationNode(EntityBase):
     collection = "Organization"
 
-    def __init__(self, name: str, domain: str = "", mentions: int = 1, confidence: float = 0.5):
-        super().__init__(name, mentions, confidence)
+    def __init__(self, name: str, domain: str = "", mentions: int = 1, confidence: float = 0.5, user_feedback: float = 0.0):
+        super().__init__(name, mentions, confidence, user_feedback)
         self.domain = domain
 
     def to_dict(self) -> dict:
@@ -64,8 +64,8 @@ class OrganizationNode(EntityBase):
 class LocationNode(EntityBase):
     collection = "Location"
 
-    def __init__(self, name: str, loc_type: str = "", mentions: int = 1, confidence: float = 0.5):
-        super().__init__(name, mentions, confidence)
+    def __init__(self, name: str, loc_type: str = "", mentions: int = 1, confidence: float = 0.5, user_feedback: float = 0.0):
+        super().__init__(name, mentions, confidence, user_feedback)
         self.loc_type = loc_type
 
     def to_dict(self) -> dict:
@@ -77,8 +77,8 @@ class LocationNode(EntityBase):
 class EventNode(EntityBase):
     collection = "Event"
 
-    def __init__(self, name: str, date: str = "", mentions: int = 1, confidence: float = 0.5):
-        super().__init__(name, mentions, confidence)
+    def __init__(self, name: str, date: str = "", mentions: int = 1, confidence: float = 0.5, user_feedback: float = 0.0):
+        super().__init__(name, mentions, confidence, user_feedback)
         self.date = date
 
     def to_dict(self) -> dict:

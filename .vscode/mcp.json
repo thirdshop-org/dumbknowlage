@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "notes-graph": {
+      "type": "stdio",
+      "command": "/home/lhommenul/Documents/notes/whisper-nlp-graph/venv/bin/python3",
+      "args": [
+        "/home/lhommenul/Documents/notes/whisper-nlp-graph/main.py",
+        "mcp",
+        "stdio"
+      ]
+    }
+  }
+}

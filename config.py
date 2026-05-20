@@ -84,10 +84,9 @@ class RAGConfig:
     embed_model: str = "nomic-embed-text"
     embed_dim: int = 768
     ollama_base_url: str = "http://192.168.1.21:11434"
-    llm_model: str = "mistral:latest"
     chroma_persist_dir: str = ""
     chroma_collection: str = "whisper_nlp_chunks"
-    top_k: int = 5
+    top_k: int = 3
     use_graph_enrichment: bool = True
     similarity_threshold: float = 0.3
 

@@ -1027,23 +1027,30 @@ def cmd_rag(args: argparse.Namespace):
         from rag.query_engine import query
 
         result = query(question, top_k=args.top_k)
-        console.print(f"\n[bold]Réponse:[/]\n{result.answer}\n")
+        console.print(f"\n[bold]Contexte:[/]\n")
+        for i, chunk in enumerate(result.retrieval.chunks if result.retrieval else [], 1):
+            source = chunk.metadata.get("source", "?")
+            stype = chunk.metadata.get("source_type", "?")
+            console.print(f"  [dim]--- Document {i} ({source}) [{stype}] ---[/]")
+            console.print(f"  {chunk.text[:300]}...\n")
         if result.sources:
             table = Table(title="Sources")
             table.add_column("Score", style="yellow")
+            table.add_column("Type", style="blue")
             table.add_column("Source", style="cyan")
             for s in result.sources:
-                table.add_row(str(s["score"]), s["source"][:60])
+                table.add_row(str(s["score"]), s.get("source_type", ""), s["source"][:60])
             console.print(table)
+        console.print("\n[dim]Contexte prêt — utilise un LLM externe via MCP pour générer la réponse.[/]")
 
 
 def cmd_mcp(args: argparse.Namespace):
     """Démarrer le serveur MCP."""
     if args.mcp_mode == "stdio":
-        from mcp.server import main_stdio
+        from mcp_host.server import main_stdio
         main_stdio()
     else:
-        from mcp.server import main as mcp_cli
+        from mcp_host.server import main as mcp_cli
         mcp_cli()
 
 

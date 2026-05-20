@@ -3,15 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import requests
-
-from config import config
 from rag.retriever import HybridRetriever, RetrievalResult
 
 
 @dataclass
 class QueryResult:
-    answer: str
+    context: str
     sources: list[dict] = field(default_factory=list)
     retrieval: RetrievalResult | None = None
 
@@ -44,35 +41,14 @@ def query(question: str, top_k: int | None = None) -> QueryResult:
 
     context = build_context(retrieval)
 
-    prompt = (
-        "Tu es un assistant spécialisé dans l'analyse de transcriptions et documents. "
-        "Réponds à la question en te basant UNIQUEMENT sur le contexte fourni.\n"
-        "Si le contexte ne contient pas la réponse, dis-le clairement.\n\n"
-        f"Contexte :\n{context}\n\n"
-        f"Question : {question}\n"
-        "Réponse :"
-    )
-
-    resp = requests.post(
-        f"{config.rag.ollama_base_url}/api/generate",
-        json={
-            "model": config.rag.llm_model,
-            "prompt": prompt,
-            "stream": False,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    answer = data.get("response", "")
-
     sources = []
     for chunk in retrieval.chunks:
         sources.append({
             "id": chunk.id,
             "score": round(chunk.score, 3),
             "source": chunk.metadata.get("source", ""),
+            "source_type": chunk.metadata.get("source_type", ""),
             "text_preview": chunk.text[:200],
         })
 
-    return QueryResult(answer=answer, sources=sources, retrieval=retrieval)
+    return QueryResult(context=context, sources=sources, retrieval=retrieval)
