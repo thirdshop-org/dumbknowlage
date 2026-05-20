@@ -202,7 +202,7 @@ class GraphManager:
         FOR v, e IN 1..{depth} ANY '{start}'
             GRAPH 'knowledge_graph'
             LIMIT 100
-            RETURN {{entity: v._id, name: v.name || v.lemma, relation: e.relation_type || e._from}}
+            RETURN {{entity: v._id, name: v.filename || v.name || v.lemma, relation: e.relation_type || e._from}}
         """
         return self.query(aql)
 

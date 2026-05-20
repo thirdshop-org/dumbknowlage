@@ -169,7 +169,7 @@ def main_stdio():
     from mcp.types import Tool, TextContent
     from mcp.server.stdio import stdio_server
 
-    server = Server(config.mcp.server_name, timeout=300, max_timeout=600)
+    server = Server(config.mcp.server_name)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -359,7 +359,8 @@ def main_stdio():
             if docs:
                 lines.append(f"**Documents ({len(docs)}):**")
                 for d in docs:
-                    lines.append(f"- {d.get('title', d['id'])}")
+                    doc_name = d.get('filename') or d.get('title') or d['id']
+                    lines.append(f"- {doc_name}")
                 lines.append("")
             if network:
                 lines.append(f"**Connexions (profondeur {depth}):**")
