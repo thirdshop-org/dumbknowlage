@@ -156,6 +156,7 @@ def _run_nlp_pipeline(
     chunks: list[dict],
     lang: str,
     build_graph: bool,
+    doc_metadata: dict | None = None,
 ):
     console.print("\n[bold cyan]Analyse NLP...[/]")
 
@@ -206,7 +207,7 @@ def _run_nlp_pipeline(
 
     # Graphe
     if build_graph:
-        _build_graph(session_id, spacy_result, chunks, co_occurrences, topics)
+        _build_graph(session_id, spacy_result, chunks, co_occurrences, topics, doc_metadata)
 
 
 def _display_analysis(frequencies, co_occurrences, tfidf, burst_topics, topics):
@@ -253,7 +254,8 @@ def _display_analysis(frequencies, co_occurrences, tfidf, burst_topics, topics):
             console.print(f"  • [cyan]{t['sentence'][:80]}...[/]")
 
 
-def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics):
+def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
+                 doc_metadata: dict | None = None):
     console.print("  [bold yellow]Construction du graphe ArangoDB...[/]")
     from graph.arango_client import GraphManager
     from graph.models import DocumentNode, SentenceNode, TopicNode, WordNode
@@ -263,11 +265,22 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics):
         console.print("[red]Impossible de connecter ArangoDB. Vérifiez docker-compose.[/]")
         return
 
-    # Document
-    doc_node = DocumentNode(
-        filename=f"session_{session_id}",
-        session_id=session_id,
-    )
+    # Document node
+    if doc_metadata:
+        doc_node = DocumentNode(
+            filename=doc_metadata.get("filename", f"session_{session_id}"),
+            session_id=session_id,
+            title=doc_metadata.get("title", ""),
+            author=doc_metadata.get("author", ""),
+            pages=doc_metadata.get("pages", 0),
+            file_type=doc_metadata.get("file_type", ""),
+            word_count=doc_metadata.get("word_count", 0),
+        )
+    else:
+        doc_node = DocumentNode(
+            filename=f"session_{session_id}",
+            session_id=session_id,
+        )
     gm.insert_document(doc_node)
 
     # Words
@@ -305,7 +318,7 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics):
     for c in chunks:
         sn = SentenceNode(
             text=c["text"],
-            timestamp=c["start_time"],
+            timestamp=c.get("start_time", 0),
             session_id=session_id,
             chunk_index=c["chunk_index"],
         )
@@ -559,6 +572,63 @@ def cmd_pipeline(args: argparse.Namespace):
     console.print(f"\n[bold green]Pipeline terminé ! Session ID: {session_id}[/]")
 
 
+def cmd_ingest(args: argparse.Namespace):
+    """Ingérer un document (PDF, TXT, DOCX) dans la base de mémoire."""
+    file_path = Path(args.file)
+    if not file_path.exists():
+        console.print(f"[red]Fichier introuvable: {file_path}[/]")
+        sys.exit(1)
+
+    from document.reader import chunk_text, get_metadata, read_file
+
+    store = SQLiteStore()
+    store.connect()
+
+    lang = args.language or "fr"
+
+    console.print(Panel(f"[bold yellow]Ingestion: {file_path.name}[/]"))
+    console.print(f"[yellow]Type:[/] {file_path.suffix.upper()} | [yellow]Langue:[/] {lang}")
+
+    with console.status("[bold green]Lecture du document...") as status:
+        text = read_file(file_path)
+    console.print(f"✓ {len(text)} caractères lus")
+
+    meta = get_metadata(file_path, text)
+    console.print(f"  Titre: {meta['title']}")
+    if meta['author']:
+        console.print(f"  Auteur: {meta['author']}")
+    if meta['pages']:
+        console.print(f"  Pages: {meta['pages']}")
+    console.print(f"  Mots: {meta['word_count']}")
+
+    chunks = chunk_text(text)
+    console.print(f"✓ {len(chunks)} chunks générés\n")
+
+    session_id = store.create_session(
+        source=str(file_path),
+        language=lang,
+        model=f"document/{meta['file_type']}",
+    )
+    store.insert_chunks_batch(session_id, chunks)
+    store.insert_document(
+        session_id=session_id,
+        filename=str(file_path),
+        title=meta["title"],
+        author=meta["author"],
+        pages=meta["pages"],
+        file_type=meta["file_type"],
+        word_count=meta["word_count"],
+    )
+
+    _run_nlp_pipeline(
+        store, session_id, chunks, lang,
+        build_graph=args.build_graph,
+        doc_metadata=meta | {"filename": str(file_path)},
+    )
+
+    console.print(f"\n[bold green]✓ Document ingéré ! Session ID: {session_id}[/]")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="whisper-nlp-graph — Transcription Whisper + NLP + Graphe de connaissances",
@@ -573,6 +643,11 @@ Exemples:
 
   # Pipeline complet
   python main.py pipeline audio.mp3 --lang fr --build-graph
+
+  # Ingérer un document dans la base mémoire
+  python main.py ingest document.pdf --build-graph
+  python main.py ingest notes.md --lang fr --build-graph
+  python main.py ingest rapport.docx --build-graph
 
   # Requêter le graphe ArangoDB
   python main.py graph query "FOR w IN Word SORT w.frequency DESC LIMIT 10 RETURN w"
@@ -615,6 +690,12 @@ Exemples:
     pipeline_parser.add_argument("--build-graph", action="store_true", help="Construire le graphe")
     pipeline_parser.add_argument("--output", "-o", default=None, help="Fichier de sortie JSON")
 
+    # ingest
+    ingest_parser = subparsers.add_parser("ingest", help="Ingérer un document (PDF/TXT/DOCX/MD) dans la base mémoire")
+    ingest_parser.add_argument("file", help="Chemin du fichier document")
+    ingest_parser.add_argument("--language", "-l", default=None, help="Langue (défaut: fr)")
+    ingest_parser.add_argument("--build-graph", action="store_true", help="Construire le graphe")
+
     # sessions
     subparsers.add_parser("sessions", help="Lister les sessions")
 
@@ -647,6 +728,7 @@ Exemples:
         "record": cmd_record,
         "transcribe": cmd_transcribe,
         "pipeline": cmd_pipeline,
+        "ingest": cmd_ingest,
         "sessions": cmd_sessions,
         "show": cmd_show,
         "export": cmd_export,

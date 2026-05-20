@@ -49,8 +49,21 @@ class SQLiteStore:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                title TEXT,
+                author TEXT,
+                pages INTEGER,
+                file_type TEXT,
+                word_count INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
             CREATE INDEX IF NOT EXISTS idx_analysis_session ON analysis(session_id);
+            CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id);
         """)
         self._conn.commit()
 
@@ -122,6 +135,25 @@ class SQLiteStore:
             d = dict(r)
             d["result"] = json.loads(d["result"])
             yield d
+
+    def insert_document(self, session_id: str, filename: str, title: str | None = None,
+                         author: str | None = None, pages: int | None = None,
+                         file_type: str | None = None, word_count: int | None = None):
+        now = datetime.now().isoformat()
+        self._conn.execute(
+            """INSERT INTO documents (session_id, filename, title, author, pages, file_type, word_count, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, filename, title, author, pages, file_type, word_count, now),
+        )
+        self._conn.commit()
+
+    def get_document(self, session_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM documents WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
 
     def close(self):
         if self._conn:

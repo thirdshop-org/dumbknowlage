@@ -73,22 +73,29 @@ class TopicNode:
 
 
 class DocumentNode:
-    def __init__(self, filename: str, duration: float = 0.0,
-                 model: str = "turbo", session_id: str = ""):
+    def __init__(self, filename: str, session_id: str = "",
+                 title: str = "", author: str = "", pages: int = 0,
+                 file_type: str = "", word_count: int = 0):
         import hashlib
         self._key = hashlib.md5(session_id.encode()).hexdigest()[:12]
         self.filename = filename
-        self.duration = duration
-        self.model = model
         self.session_id = session_id
+        self.title = title
+        self.author = author
+        self.pages = pages
+        self.file_type = file_type
+        self.word_count = word_count
 
     def to_dict(self) -> dict:
         return {
             "_key": self._key,
             "filename": self.filename,
-            "duration": self.duration,
-            "model": self.model,
             "session_id": self.session_id,
+            "title": self.title,
+            "author": self.author,
+            "pages": self.pages,
+            "file_type": self.file_type,
+            "word_count": self.word_count,
         }
 
 
