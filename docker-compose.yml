@@ -28,16 +28,6 @@ services:
       WHISPER_MODEL: ${WHISPER_MODEL:-turbo}
       COMPUTE_TYPE: ${COMPUTE_TYPE:-float32}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-    labels:
-      - traefik.enable=${TRAEFIK_ENABLE:-false}
-      - traefik.docker.network=${TRAEFIK_NETWORK:-dokploy-network}
-      - traefik.http.routers.notes-graph-api.rule=Host(`${API_DOMAIN:-notes-graph.local}`)
-      - traefik.http.routers.notes-graph-api.entrypoints=web
-      - traefik.http.services.notes-graph-api.loadbalancer.server.port=8000
-      - traefik.http.routers.notes-graph-api.middlewares=redirect-to-https@file
-      - traefik.http.routers.notes-graph-api-secure.rule=Host(`${API_DOMAIN:-notes-graph.local}`)
-      - traefik.http.routers.notes-graph-api-secure.entrypoints=websecure
-      - traefik.http.routers.notes-graph-api-secure.tls.certresolver=letsencrypt
     networks:
       - dokploy-network
       - default
