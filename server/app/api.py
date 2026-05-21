@@ -113,53 +113,57 @@ async def transcribe_audio(
     language: str = Query("fr"),
     build_graph: bool = Query(True),
 ):
+    import traceback
     import numpy as np
     import soundfile as sf
     from io import BytesIO
     from audio.chunker import chunk_audio
     from transcription.transcriber import Transcriber
 
-    # Convert to WAV via ffmpeg (handles mp3, m4a, etc.)
-    raw = await file.read()
-    import subprocess, tempfile, os
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        wav_path = tmp.name
     try:
-        proc = subprocess.run(
-            ["ffmpeg", "-i", "pipe:0", "-ac", "1", "-ar", str(config.chunk.sample_rate),
-             "-sample_fmt", "s16", "-y", wav_path],
-            input=raw, capture_output=True, timeout=120,
+        # Convert to WAV via ffmpeg (handles mp3, m4a, etc.)
+        raw = await file.read()
+        import subprocess, tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_path = tmp.name
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", "pipe:0", "-ac", "1", "-ar", str(config.chunk.sample_rate),
+                 "-sample_fmt", "s16", "-y", wav_path],
+                input=raw, capture_output=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg error: {proc.stderr.decode()}")
+            audio, sr = sf.read(wav_path)
+        finally:
+            os.unlink(wav_path)
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+
+        duration = len(audio) / sr
+
+        store = _get_store()
+        session_id = store.create_session(
+            source=file.filename or "audio_upload",
+            language=language,
+            model=f"whisper-{config.whisper.model}",
+            duration=duration,
         )
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg error: {proc.stderr.decode()}")
-        audio, sr = sf.read(wav_path)
-    finally:
-        os.unlink(wav_path)
-    if len(audio.shape) > 1:
-        audio = audio.mean(axis=1)
 
-    duration = len(audio) / sr
+        transcriber = Transcriber(model_name=config.whisper.model)
+        chunks = transcriber.transcribe_chunks(audio, language=language)
+        store.insert_chunks_batch(session_id, chunks)
 
-    store = _get_store()
-    session_id = store.create_session(
-        source=file.filename or "audio_upload",
-        language=language,
-        model=f"whisper-{config.whisper.model}",
-        duration=duration,
-    )
-
-    transcriber = Transcriber(model_name=config.whisper.model)
-    chunks = transcriber.transcribe_chunks(audio, language=language)
-    store.insert_chunks_batch(session_id, chunks)
-
-    try:
-        _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
-    except Exception as e:
+        try:
+            _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
+        except Exception as e:
+            store.close()
+            raise HTTPException(500, f"Pipeline error: {type(e).__name__}: {e}")
         store.close()
-        raise HTTPException(500, f"Pipeline error: {type(e).__name__}: {e}")
-    store.close()
 
-    return SessionCreateResponse(session_id=session_id, chunks_count=len(chunks))
+        return SessionCreateResponse(session_id=session_id, chunks_count=len(chunks))
+    except Exception as e:
+        raise HTTPException(500, f"Transcribe error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
 # ─── Ingest ──────────────────────────────────────────────────────────────────

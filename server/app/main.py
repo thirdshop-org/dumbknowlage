@@ -26,7 +26,30 @@ app.include_router(router)
 
 @app.on_event("startup")
 async def startup():
-    pass
+    import asyncio
+    asyncio.create_task(_preload_models())
+
+
+async def _preload_models():
+    import logging
+    logger = logging.getLogger("uvicorn")
+    try:
+        logger.info("Preloading spaCy models...")
+        import spacy
+        spacy.load("fr_core_news_lg")
+        spacy.load("en_core_web_lg")
+        logger.info("spaCy models loaded")
+    except Exception as e:
+        logger.warning(f"spaCy preload failed: {e}")
+
+    try:
+        logger.info("Preloading Whisper model...")
+        from transcription.whisper_model import WhisperModel
+        m = WhisperModel()
+        m.load()
+        logger.info("Whisper model loaded")
+    except Exception as e:
+        logger.warning(f"Whisper preload failed: {e}")
 
 
 @app.on_event("shutdown")
