@@ -1,17 +1,73 @@
-version: '3.8'
-
 services:
-  arangodb:
-    image: arangodb:3.12
-    container_name: whisper-nlp-arango
-    ports:
-      - "8529:8529"
-    environment:
-      ARANGO_ROOT_PASSWORD: whispernlp
+  arango-db:
+    image: docker.io/library/arangodb:3.12
+    restart: unless-stopped
     volumes:
-      - arango_data:/var/lib/arangodb3
-      - arango_apps:/var/lib/arangodb3-apps
+      - arango-data:/var/lib/arangodb3
+      - arango-apps:/var/lib/arangodb3-apps
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGO_ROOT_PASSWORD:?ARANGO_ROOT_PASSWORD is required}
+
+  notes-graph-api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - arango-db
+    ports:
+      - ${API_PORT:-8000}:8000
+    volumes:
+      - model-cache:/root/.cache
+      - api-sessions:/app/data
+    environment:
+      ARANGO_HOST: http://arango-db:8529
+      ARANGO_ROOT_PASSWORD: ${ARANGO_ROOT_PASSWORD:?ARANGO_ROOT_PASSWORD is required}
+      ARANGO_DATABASE: ${ARANGO_DATABASE:-whisper_nlp_graph}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://192.168.1.21:11434}
+      WHISPER_MODEL: ${WHISPER_MODEL:-turbo}
+      COMPUTE_TYPE: ${COMPUTE_TYPE:-float32}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    labels:
+      - traefik.enable=${TRAEFIK_ENABLE:-false}
+      - traefik.docker.network=${TRAEFIK_NETWORK:-dokploy-network}
+      - traefik.http.routers.notes-graph-api.rule=Host(`${API_DOMAIN:-notes-graph.local}`)
+      - traefik.http.routers.notes-graph-api.entrypoints=web
+      - traefik.http.services.notes-graph-api.loadbalancer.server.port=8000
+      - traefik.http.routers.notes-graph-api.middlewares=redirect-to-https@file
+      - traefik.http.routers.notes-graph-api-secure.rule=Host(`${API_DOMAIN:-notes-graph.local}`)
+      - traefik.http.routers.notes-graph-api-secure.entrypoints=websecure
+      - traefik.http.routers.notes-graph-api-secure.tls.certresolver=letsencrypt
+    networks:
+      - dokploy-network
+      - default
 
 volumes:
-  arango_data:
-  arango_apps:
+  arango-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT:-${PWD}/.data}/arango/data
+  arango-apps:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT:-${PWD}/.data}/arango/apps
+  model-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT:-${PWD}/.data}/models
+  api-sessions:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT:-${PWD}/.data}/sessions
+
+networks:
+  dokploy-network:
+    external: true
