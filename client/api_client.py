@@ -1,12 +1,30 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
 from config import config
+
+
+_TRANSIENT_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+
+def _retry_once(call: Callable[[], requests.Response],
+                backoff_s: float = 2.0) -> requests.Response:
+    """Run `call` and retry once on ConnectionError / Timeout. Useful when a
+    backend instance is being redeployed or a request races a server restart."""
+    try:
+        return call()
+    except _TRANSIENT_ERRORS:
+        time.sleep(backoff_s)
+        return call()
 
 
 class ApiClient:
@@ -25,16 +43,24 @@ class ApiClient:
     def transcribe(self, audio_path: str | Path, language: str = "fr",
                    build_graph: bool = True, defer: bool = False) -> dict:
         path = Path(audio_path)
-        with open(path, "rb") as f:
-            r = requests.post(
-                self.url(
-                    f"/api/sessions/transcribe?language={language}"
-                    f"&build_graph={str(build_graph).lower()}"
-                    f"&defer={str(defer).lower()}"
-                ),
-                files={"file": (path.name, f, "audio/mpeg")},
-                timeout=30 if defer else self.timeout,
-            )
+        url = self.url(
+            f"/api/sessions/transcribe?language={language}"
+            f"&build_graph={str(build_graph).lower()}"
+            f"&defer={str(defer).lower()}"
+        )
+        # In defer mode the server returns once the session row + chunks are
+        # written; that can be slow under load (SQLite contention, redeploys),
+        # so give it 90 s instead of the previous 30 s.
+        req_timeout = 90 if defer else self.timeout
+
+        def call():
+            with open(path, "rb") as f:
+                return requests.post(
+                    url, files={"file": (path.name, f, "audio/mpeg")},
+                    timeout=req_timeout,
+                )
+
+        r = _retry_once(call)
         r.raise_for_status()
         return r.json()
 
@@ -43,16 +69,20 @@ class ApiClient:
                defer: bool = False) -> dict:
         # Use the JSON-body endpoint: query-string ingest blows the URL size
         # limit on documents larger than a few KB.
-        r = requests.post(
-            self.url("/api/sessions/ingest/json"),
-            json={
-                "text": text,
-                "filename": filename,
-                "language": language,
-                "build_graph": build_graph,
-                "defer": defer,
-            },
-            timeout=30 if defer else self.timeout,
+        payload = {
+            "text": text,
+            "filename": filename,
+            "language": language,
+            "build_graph": build_graph,
+            "defer": defer,
+        }
+        req_timeout = 90 if defer else self.timeout
+        r = _retry_once(
+            lambda: requests.post(
+                self.url("/api/sessions/ingest/json"),
+                json=payload,
+                timeout=req_timeout,
+            )
         )
         r.raise_for_status()
         return r.json()

@@ -16,8 +16,18 @@ class SQLiteStore:
         self._conn: sqlite3.Connection | None = None
 
     def connect(self):
-        self._conn = sqlite3.connect(str(self.db_path))
+        # WAL: lets readers run concurrently with a single writer.
+        # busy_timeout: wait up to 10s on SQLITE_BUSY before raising.
+        # synchronous=NORMAL: safe with WAL, much faster than the default FULL.
+        # check_same_thread=False: FastAPI BackgroundTasks may pass the
+        # connection between the threadpool and the event loop.
+        self._conn = sqlite3.connect(
+            str(self.db_path), timeout=10.0, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=10000")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._ensure_tables()
 
     def _ensure_tables(self):

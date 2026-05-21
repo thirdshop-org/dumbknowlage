@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,11 @@ from shared.schemas import (
 )
 
 router = APIRouter()
+
+# Serialize deferred NLP pipelines: Whisper + spaCy + embeddings + Arango
+# writes are heavy. Running several in parallel saturates RAM/CPU and (more
+# critically) makes the SQLite analysis table fight over the writer lock.
+_PIPELINE_SEM = threading.Semaphore(1)
 
 
 def _get_store() -> SQLiteStore:
@@ -169,47 +175,49 @@ def _transcribe_defer(raw: bytes, filename: str, language: str, build_graph: boo
 def _transcribe_pipeline_background(raw: bytes, session_id: str, language: str,
                                     build_graph: bool):
     """Run ffmpeg + Whisper + NLP for a previously-created session.
-    Best-effort: failures are logged, no exception is propagated."""
-    import traceback
-    import numpy as np
-    import soundfile as sf
-    from transcription.transcriber import Transcriber
+    Best-effort: failures are logged, no exception is propagated.
+    Serialized via _PIPELINE_SEM so only one pipeline runs at a time."""
+    with _PIPELINE_SEM:
+        import traceback
+        import numpy as np
+        import soundfile as sf
+        from transcription.transcriber import Transcriber
 
-    try:
-        import subprocess, tempfile, os
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            wav_path = tmp.name
         try:
-            proc = subprocess.run(
-                ["ffmpeg", "-i", "pipe:0", "-ac", "1", "-ar", str(config.chunk.sample_rate),
-                 "-sample_fmt", "s16", "-y", wav_path],
-                input=raw, capture_output=True, timeout=120,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError(f"ffmpeg error: {proc.stderr.decode()}")
-            audio, sr = sf.read(wav_path)
-        finally:
-            os.unlink(wav_path)
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=1)
-        audio = audio.astype(np.float32)
-
-        store = _get_store()
-        try:
-            transcriber = Transcriber(model_name=config.whisper.model)
-            chunks = transcriber.transcribe_chunks(audio, language=language)
-            store.insert_chunks_batch(session_id, chunks)
-            store.update_session_duration(session_id, len(audio) / sr) if hasattr(store, "update_session_duration") else None
+            import subprocess, tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                wav_path = tmp.name
             try:
-                _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
-            except Exception as e:
-                print(f"[transcribe defer] NLP pipeline error for session {session_id}: "
-                      f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
-        finally:
-            store.close()
-    except Exception as e:
-        print(f"[transcribe defer] Transcription error for session {session_id}: "
-              f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+                proc = subprocess.run(
+                    ["ffmpeg", "-i", "pipe:0", "-ac", "1", "-ar", str(config.chunk.sample_rate),
+                     "-sample_fmt", "s16", "-y", wav_path],
+                    input=raw, capture_output=True, timeout=120,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(f"ffmpeg error: {proc.stderr.decode()}")
+                audio, sr = sf.read(wav_path)
+            finally:
+                os.unlink(wav_path)
+            if len(audio.shape) > 1:
+                audio = audio.mean(axis=1)
+            audio = audio.astype(np.float32)
+
+            store = _get_store()
+            try:
+                transcriber = Transcriber(model_name=config.whisper.model)
+                chunks = transcriber.transcribe_chunks(audio, language=language)
+                store.insert_chunks_batch(session_id, chunks)
+                store.update_session_duration(session_id, len(audio) / sr) if hasattr(store, "update_session_duration") else None
+                try:
+                    _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
+                except Exception as e:
+                    print(f"[transcribe defer] NLP pipeline error for session {session_id}: "
+                          f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+            finally:
+                store.close()
+        except Exception as e:
+            print(f"[transcribe defer] Transcription error for session {session_id}: "
+                  f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
 def _transcribe_sync(raw: bytes, filename: str, language: str, build_graph: bool):
@@ -316,17 +324,19 @@ def _ingest_text_defer(text: str, filename: str, language: str, build_graph: boo
 
 def _ingest_pipeline_background(session_id: str, chunks: list, language: str,
                                 build_graph: bool, doc_metadata: dict):
-    """Run the NLP pipeline for an existing session. Best-effort, logs on failure."""
-    import traceback
-    store = _get_store()
-    try:
-        _run_nlp_pipeline(store, session_id, chunks, language, build_graph,
-                          doc_metadata=doc_metadata)
-    except Exception as e:
-        print(f"[ingest defer] Pipeline error for session {session_id}: "
-              f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
-    finally:
-        store.close()
+    """Run the NLP pipeline for an existing session. Best-effort, logs on failure.
+    Serialized via _PIPELINE_SEM so only one pipeline runs at a time."""
+    with _PIPELINE_SEM:
+        import traceback
+        store = _get_store()
+        try:
+            _run_nlp_pipeline(store, session_id, chunks, language, build_graph,
+                              doc_metadata=doc_metadata)
+        except Exception as e:
+            print(f"[ingest defer] Pipeline error for session {session_id}: "
+                  f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        finally:
+            store.close()
 
 
 def _ingest_text_sync(text: str, filename: str, language: str, build_graph: bool):
