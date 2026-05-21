@@ -36,10 +36,6 @@ class SettingsDialog(QDialog):
         self.default_lang.addItems(["fr", "en", "de", "es", "it"])
         form.addRow("Default language:", self.default_lang)
 
-        self.default_duration = QLineEdit()
-        self.default_duration.setPlaceholderText("30")
-        form.addRow("Recording duration (s):", self.default_duration)
-
         self.ocr_lang = QLineEdit()
         self.ocr_lang.setPlaceholderText("fra")
         form.addRow("OCR language (tesseract):", self.ocr_lang)
@@ -72,7 +68,6 @@ class SettingsDialog(QDialog):
         idx = self.default_lang.findText(config.default_language)
         if idx >= 0:
             self.default_lang.setCurrentIndex(idx)
-        self.default_duration.setText(str(config.default_duration))
 
     def _test_connection(self):
         import os
@@ -99,8 +94,4 @@ class SettingsDialog(QDialog):
         os.environ["NOTES_GRAPH_SERVER"] = self.server_url.text().strip()
         config.server_url = self.server_url.text().strip()
         config.default_language = self.default_lang.currentText()
-        try:
-            config.default_duration = float(self.default_duration.text())
-        except ValueError:
-            pass
         self.accept()

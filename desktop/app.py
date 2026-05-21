@@ -94,11 +94,11 @@ class TrayApp:
         dlg = SettingsDialog(self.main_window)
         dlg.exec()
 
-    def _on_recording_done(self, session_id: str):
+    def _on_recording_done(self, chunks: str):
         self.record_act.setText("Start Recording")
         self.tray.showMessage(
             "Recording Complete",
-            f"Session {session_id} transcribed and indexed",
+            f"{chunks} audio chunks sent to server",
             QSystemTrayIcon.MessageIcon.Information,
             4000,
         )
