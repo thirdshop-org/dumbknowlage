@@ -50,7 +50,7 @@ class RecorderPanel(QWidget):
         self._record_thread: threading.Thread | None = None
         self._chunk_timer = QTimer()
         self._chunk_timer.timeout.connect(self._send_chunk)
-        self._chunk_interval_ms = 10000
+        self._chunk_interval_ms = 60000
         self._uploaders: list[ChunkUploader] = []
         self._stopping = False
 
