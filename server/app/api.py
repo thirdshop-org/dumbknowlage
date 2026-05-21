@@ -143,7 +143,11 @@ async def transcribe_audio(
     chunks = transcriber.transcribe_chunks(audio, language=language)
     store.insert_chunks_batch(session_id, chunks)
 
-    _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
+    try:
+        _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
+    except Exception as e:
+        store.close()
+        raise HTTPException(500, f"Pipeline error: {type(e).__name__}: {e}")
     store.close()
 
     return SessionCreateResponse(session_id=session_id, chunks_count=len(chunks))
@@ -175,8 +179,12 @@ async def ingest_text(
     ]
     store.insert_chunks_batch(session_id, chunks)
 
-    _run_nlp_pipeline(store, session_id, chunks, language, build_graph,
-                      doc_metadata={"filename": filename, "file_type": Path(filename).suffix})
+    try:
+        _run_nlp_pipeline(store, session_id, chunks, language, build_graph,
+                          doc_metadata={"filename": filename, "file_type": Path(filename).suffix})
+    except Exception as e:
+        store.close()
+        raise HTTPException(500, f"Pipeline error: {type(e).__name__}: {e}")
     store.close()
 
     return SessionCreateResponse(session_id=session_id, chunks_count=len(chunks))
