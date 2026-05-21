@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from config import config
@@ -223,15 +223,12 @@ async def context(
     result = rag_query(question, top_k=top_k)
     entities = []
     if result.retrieval and result.retrieval.graph_context:
-        import re
         seen = set()
-        for line in result.retrieval.graph_context.split("\n"):
-            m = re.match(r"- `(\w+)` \*\*(.+?)\*\*", line)
-            if m:
-                key = m.group(1) + m.group(2)
-                if key not in seen:
-                    seen.add(key)
-                    entities.append(EntityInfo(name=m.group(2), type=m.group(1), key=""))
+        for ent in result.retrieval.graph_context.entities:
+            key = ent.get("name", "") + ent.get("type", "")
+            if key not in seen:
+                seen.add(key)
+                entities.append(EntityInfo(name=ent.get("name", ""), type=ent.get("type", ""), key=""))
     return ContextResult(
         context=result.context,
         sources=result.sources,
@@ -365,12 +362,22 @@ async def delete_rule(rule_key: str):
 # ─── MCP SSE endpoint ────────────────────────────────────────────────────────
 
 
-@router.get("/mcp", response_class=PlainTextResponse)
-async def mcp_sse():
-    return "MCP SSE endpoint — use /mcp?transport=sse&session_id=..."
+from mcp.server.sse import SseServerTransport as _SseTransport
+_mcp_sse = _SseTransport("/mcp")
+
+
+def _get_mcp_server():
+    from mcp_handler import create_mcp_server
+    return create_mcp_server()
+
+
+@router.get("/mcp")
+async def mcp_sse(request: Request):
+    server = _get_mcp_server()
+    async with _mcp_sse.connect_sse(request.scope, request.receive, request._send) as streams:
+        await server.run(streams[0], streams[1], server.create_initialization_options())
 
 
 @router.post("/mcp")
-async def mcp_post():
-    from server.app.mcp import handle_mcp_message
-    return await handle_mcp_message()
+async def mcp_post(request: Request):
+    await _mcp_sse.handle_post_message(request.scope, request.receive, request._send)
