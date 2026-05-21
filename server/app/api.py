@@ -81,6 +81,23 @@ async def health():
     return status
 
 
+@router.get("/api/debug/whisper")
+async def debug_whisper():
+    import traceback, sys
+    try:
+        from transcription.whisper_model import WhisperModel
+        m = WhisperModel()
+        m.load()
+        return {"status": "loaded", "model": config.whisper.model}
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
+            "python": sys.version,
+        }
+
+
 # ─── Sessions ────────────────────────────────────────────────────────────────
 
 
