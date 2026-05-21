@@ -71,6 +71,28 @@ class EntitiesWorker(QThread):
             self.finished.emit([{"error": str(e)}])
 
 
+SUPPORTED_INGEST_EXTS = {
+    ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm",
+    ".mp3", ".wav", ".m4a", ".ogg", ".flac",
+    ".pdf", ".docx",
+}
+
+
+def expand_ingest_paths(paths):
+    """Walk dropped paths: keep files, recurse into directories.
+    Returns a flat list of file paths whose extension is supported."""
+    out = []
+    for p in paths:
+        path = Path(p)
+        if path.is_dir():
+            for fp in path.rglob("*"):
+                if fp.is_file() and fp.suffix.lower() in SUPPORTED_INGEST_EXTS:
+                    out.append(str(fp))
+        elif path.is_file():
+            out.append(str(path))
+    return out
+
+
 class IngestWorker(QThread):
     finished = Signal(str)
     progress = Signal(str)
@@ -359,7 +381,10 @@ class DragDropArea(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout()
-        self.label = QLabel("Drop files here\n\nSupported: .txt .md .pdf .docx .mp3 .wav .m4a")
+        self.label = QLabel(
+            "Drop files or folders here\n\n"
+            "Supported: .txt .md .csv .json .xml .html · .pdf .docx · .mp3 .wav .m4a .ogg .flac"
+        )
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet(
             "border: 2px dashed #888; border-radius: 8px; padding: 20px;"
@@ -399,8 +424,12 @@ class IngestTab(QWidget):
         self.setLayout(layout)
 
     def _on_files_dropped(self, paths):
-        self.log.append(f"Dropped {len(paths)} file(s)")
-        self.worker = IngestWorker(self.client, paths)
+        files = expand_ingest_paths(paths)
+        if not files:
+            self.log.append(f"Dropped {len(paths)} item(s) — no supported files found.")
+            return
+        self.log.append(f"Dropped {len(paths)} item(s) → {len(files)} file(s) to ingest")
+        self.worker = IngestWorker(self.client, files)
         self.worker.progress.connect(lambda msg: self.log.append(msg))
         self.worker.finished.connect(lambda: self.log.append("--- Done ---"))
         self.worker.start()
