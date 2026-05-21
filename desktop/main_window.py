@@ -77,6 +77,10 @@ SUPPORTED_INGEST_EXTS = {
     ".pdf", ".docx",
 }
 
+# Skip files larger than this to avoid OOM (PDFs especially can blow up
+# memory during text extraction).
+MAX_INGEST_FILE_BYTES = 100 * 1024 * 1024
+
 
 def expand_ingest_paths(paths):
     """Walk dropped paths: keep files, recurse into directories.
@@ -104,34 +108,70 @@ class IngestWorker(QThread):
         self.language = language
 
     def run(self):
-        for path in self.file_paths:
-            p = Path(path)
-            ext = p.suffix.lower()
-            self.progress.emit(f"Ingesting {p.name}...")
-            try:
-                if ext in (".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"):
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                    result = self.client.ingest(text, filename=p.name, language=self.language)
-                elif ext in (".mp3", ".wav", ".m4a", ".ogg", ".flac"):
-                    result = self.client.transcribe(str(p), language=self.language)
-                elif ext == ".pdf":
-                    import fitz
-                    doc = fitz.open(str(p))
-                    text = "\n\n".join(page.get_text() for page in doc)
-                    doc.close()
-                    result = self.client.ingest(text, filename=p.name, language=self.language)
-                elif ext == ".docx":
-                    from docx import Document as DocxDocument
-                    doc = DocxDocument(str(p))
-                    text = "\n".join(para.text for para in doc.paragraphs)
-                    result = self.client.ingest(text, filename=p.name, language=self.language)
-                else:
-                    self.progress.emit(f"Unsupported format: {ext}")
-                    continue
-                self.progress.emit(f"OK: {p.name} ({result.get('chunks_count', '?')} chunks)")
-            except Exception as e:
-                self.progress.emit(f"Error: {p.name}: {e}")
+        try:
+            for path in self.file_paths:
+                self._ingest_one(path)
+        except BaseException as e:
+            # Last-resort guard so a rogue file can't tear down the Qt thread
+            # (and hence the whole process on Windows).
+            self.progress.emit(f"Fatal worker error: {type(e).__name__}: {e}")
         self.finished.emit("Done")
+
+    def _ingest_one(self, path: str):
+        p = Path(path)
+        ext = p.suffix.lower()
+        try:
+            size = p.stat().st_size
+        except OSError as e:
+            self.progress.emit(f"Skip {p.name}: stat error ({e})")
+            return
+        if size > MAX_INGEST_FILE_BYTES:
+            self.progress.emit(
+                f"Skip {p.name}: too large ({size // (1024*1024)} MB > "
+                f"{MAX_INGEST_FILE_BYTES // (1024*1024)} MB)"
+            )
+            return
+
+        self.progress.emit(f"Ingesting {p.name}...")
+        try:
+            if ext in (".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"):
+                text = p.read_text(encoding="utf-8", errors="replace")
+                result = self.client.ingest(text, filename=p.name,
+                                            language=self.language, defer=True)
+            elif ext in (".mp3", ".wav", ".m4a", ".ogg", ".flac"):
+                result = self.client.transcribe(str(p), language=self.language,
+                                                defer=True)
+            elif ext == ".pdf":
+                text = self._extract_pdf_text(p)
+                result = self.client.ingest(text, filename=p.name,
+                                            language=self.language, defer=True)
+            elif ext == ".docx":
+                from docx import Document as DocxDocument
+                doc = DocxDocument(str(p))
+                text = "\n".join(para.text for para in doc.paragraphs)
+                result = self.client.ingest(text, filename=p.name,
+                                            language=self.language, defer=True)
+            else:
+                self.progress.emit(f"Unsupported format: {ext}")
+                return
+            sid = result.get("session_id", "?")
+            self.progress.emit(f"Queued: {p.name} (session {sid[:8]})")
+        except Exception as e:
+            self.progress.emit(f"Error: {p.name}: {type(e).__name__}: {e}")
+
+    @staticmethod
+    def _extract_pdf_text(p: Path) -> str:
+        """Page-by-page extraction so a huge PDF doesn't pin all pages in
+        memory at once."""
+        import fitz
+        parts = []
+        doc = fitz.open(str(p))
+        try:
+            for page in doc:
+                parts.append(page.get_text())
+        finally:
+            doc.close()
+        return "\n\n".join(parts)
 
 
 class SearchTab(QWidget):

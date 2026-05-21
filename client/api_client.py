@@ -23,24 +23,36 @@ class ApiClient:
         return r.json()
 
     def transcribe(self, audio_path: str | Path, language: str = "fr",
-                   build_graph: bool = True) -> dict:
+                   build_graph: bool = True, defer: bool = False) -> dict:
         path = Path(audio_path)
         with open(path, "rb") as f:
             r = requests.post(
-                self.url(f"/api/sessions/transcribe?language={language}&build_graph={str(build_graph).lower()}"),
+                self.url(
+                    f"/api/sessions/transcribe?language={language}"
+                    f"&build_graph={str(build_graph).lower()}"
+                    f"&defer={str(defer).lower()}"
+                ),
                 files={"file": (path.name, f, "audio/mpeg")},
-                timeout=self.timeout,
+                timeout=30 if defer else self.timeout,
             )
         r.raise_for_status()
         return r.json()
 
     def ingest(self, text: str, filename: str = "document.txt",
-               language: str = "fr", build_graph: bool = True) -> dict:
+               language: str = "fr", build_graph: bool = True,
+               defer: bool = False) -> dict:
+        # Use the JSON-body endpoint: query-string ingest blows the URL size
+        # limit on documents larger than a few KB.
         r = requests.post(
-            self.url(f"/api/sessions/ingest?text={requests.utils.quote(text)}"
-                     f"&filename={filename}&language={language}"
-                     f"&build_graph={str(build_graph).lower()}"),
-            timeout=self.timeout,
+            self.url("/api/sessions/ingest/json"),
+            json={
+                "text": text,
+                "filename": filename,
+                "language": language,
+                "build_graph": build_graph,
+                "defer": defer,
+            },
+            timeout=30 if defer else self.timeout,
         )
         r.raise_for_status()
         return r.json()

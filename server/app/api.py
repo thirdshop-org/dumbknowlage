@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from config import config
@@ -127,18 +127,89 @@ async def get_session(session_id: str):
 
 @router.post("/api/sessions/transcribe", response_model=SessionCreateResponse)
 async def transcribe_audio(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     language: str = Query("fr"),
     build_graph: bool = Query(True),
+    defer: bool = Query(False, description="Return session_id immediately; run Whisper + NLP after response"),
 ):
     # Read upload in the loop, then offload the CPU-heavy work to a worker
     # thread so the event loop stays responsive for /health, /mcp, and the
     # next chunk upload while Whisper/spaCy run.
     raw = await file.read()
     filename = file.filename or "audio_upload"
+    if defer:
+        return await asyncio.to_thread(
+            _transcribe_defer, raw, filename, language, build_graph, background_tasks
+        )
     return await asyncio.to_thread(
         _transcribe_sync, raw, filename, language, build_graph
     )
+
+
+def _transcribe_defer(raw: bytes, filename: str, language: str, build_graph: bool,
+                      background_tasks: BackgroundTasks):
+    """Create an empty session and schedule the full transcription pipeline."""
+    store = _get_store()
+    try:
+        session_id = store.create_session(
+            source=filename,
+            language=language,
+            model=f"whisper-{config.whisper.model}",
+            duration=0.0,
+        )
+    finally:
+        store.close()
+    background_tasks.add_task(
+        _transcribe_pipeline_background, raw, session_id, language, build_graph
+    )
+    return SessionCreateResponse(session_id=session_id, chunks_count=0)
+
+
+def _transcribe_pipeline_background(raw: bytes, session_id: str, language: str,
+                                    build_graph: bool):
+    """Run ffmpeg + Whisper + NLP for a previously-created session.
+    Best-effort: failures are logged, no exception is propagated."""
+    import traceback
+    import numpy as np
+    import soundfile as sf
+    from transcription.transcriber import Transcriber
+
+    try:
+        import subprocess, tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_path = tmp.name
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-i", "pipe:0", "-ac", "1", "-ar", str(config.chunk.sample_rate),
+                 "-sample_fmt", "s16", "-y", wav_path],
+                input=raw, capture_output=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg error: {proc.stderr.decode()}")
+            audio, sr = sf.read(wav_path)
+        finally:
+            os.unlink(wav_path)
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
+
+        store = _get_store()
+        try:
+            transcriber = Transcriber(model_name=config.whisper.model)
+            chunks = transcriber.transcribe_chunks(audio, language=language)
+            store.insert_chunks_batch(session_id, chunks)
+            store.update_session_duration(session_id, len(audio) / sr) if hasattr(store, "update_session_duration") else None
+            try:
+                _run_nlp_pipeline(store, session_id, chunks, language, build_graph)
+            except Exception as e:
+                print(f"[transcribe defer] NLP pipeline error for session {session_id}: "
+                      f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+        finally:
+            store.close()
+    except Exception as e:
+        print(f"[transcribe defer] Transcription error for session {session_id}: "
+              f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
 def _transcribe_sync(raw: bytes, filename: str, language: str, build_graph: bool):
@@ -199,14 +270,63 @@ def _transcribe_sync(raw: bytes, filename: str, language: str, build_graph: bool
 
 @router.post("/api/sessions/ingest", response_model=SessionCreateResponse)
 async def ingest_text(
+    background_tasks: BackgroundTasks,
     text: str = Query(..., description="Texte du document"),
     filename: str = Query("document.txt"),
     language: str = Query("fr"),
     build_graph: bool = Query(True),
+    defer: bool = Query(False, description="Return session_id immediately; run NLP pipeline after response"),
 ):
+    if defer:
+        return await asyncio.to_thread(
+            _ingest_text_defer, text, filename, language, build_graph, background_tasks
+        )
     return await asyncio.to_thread(
         _ingest_text_sync, text, filename, language, build_graph
     )
+
+
+def _ingest_text_defer(text: str, filename: str, language: str, build_graph: bool,
+                       background_tasks: BackgroundTasks):
+    """Create session + insert chunks synchronously, defer NLP pipeline."""
+    from document.reader import chunk_text
+
+    store = _get_store()
+    try:
+        session_id = store.create_session(
+            source=filename,
+            language=language,
+            model="document/ingest",
+        )
+        doc_chunks = chunk_text(text)
+        chunks = [
+            {"text": c["text"], "chunk_index": i, "start_time": 0.0, "end_time": 0.0}
+            for i, c in enumerate(doc_chunks)
+        ]
+        store.insert_chunks_batch(session_id, chunks)
+    finally:
+        store.close()
+    background_tasks.add_task(
+        _ingest_pipeline_background,
+        session_id, chunks, language, build_graph,
+        {"filename": filename, "file_type": Path(filename).suffix},
+    )
+    return SessionCreateResponse(session_id=session_id, chunks_count=len(chunks))
+
+
+def _ingest_pipeline_background(session_id: str, chunks: list, language: str,
+                                build_graph: bool, doc_metadata: dict):
+    """Run the NLP pipeline for an existing session. Best-effort, logs on failure."""
+    import traceback
+    store = _get_store()
+    try:
+        _run_nlp_pipeline(store, session_id, chunks, language, build_graph,
+                          doc_metadata=doc_metadata)
+    except Exception as e:
+        print(f"[ingest defer] Pipeline error for session {session_id}: "
+              f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+    finally:
+        store.close()
 
 
 def _ingest_text_sync(text: str, filename: str, language: str, build_graph: bool):
@@ -238,12 +358,17 @@ def _ingest_text_sync(text: str, filename: str, language: str, build_graph: bool
 
 
 @router.post("/api/sessions/ingest/json")
-async def ingest_json(payload: dict):
+async def ingest_json(payload: dict, background_tasks: BackgroundTasks):
     text = payload.get("text", "")
     filename = payload.get("filename", "document.txt")
     language = payload.get("language", "fr")
     build_graph = payload.get("build_graph", True)
-    return await ingest_text(text, filename, language, build_graph)
+    defer = payload.get("defer", False)
+    if defer:
+        return await asyncio.to_thread(
+            _ingest_text_defer, text, filename, language, build_graph, background_tasks
+        )
+    return await asyncio.to_thread(_ingest_text_sync, text, filename, language, build_graph)
 
 
 # ─── Search ──────────────────────────────────────────────────────────────────
