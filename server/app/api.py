@@ -418,7 +418,18 @@ async def delete_rule(rule_key: str):
 
 
 from mcp.server.sse import SseServerTransport as _SseTransport
+from starlette.responses import Response as _StarletteResponse
 _mcp_sse = _SseTransport("/mcp")
+
+
+class _AlreadySentResponse(_StarletteResponse):
+    """No-op response: the SSE transport already wrote everything via the raw
+    ASGI send callable. Without this, FastAPI auto-wraps the handler's `None`
+    return as a JSONResponse and tries to send a second `http.response.start`,
+    which raises RuntimeError in uvicorn."""
+
+    async def __call__(self, scope, receive, send):
+        return
 
 
 def _get_mcp_server():
@@ -431,8 +442,10 @@ async def mcp_sse(request: Request):
     server = _get_mcp_server()
     async with _mcp_sse.connect_sse(request.scope, request.receive, request._send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
+    return _AlreadySentResponse()
 
 
 @router.post("/mcp")
 async def mcp_post(request: Request):
     await _mcp_sse.handle_post_message(request.scope, request.receive, request._send)
+    return _AlreadySentResponse()
