@@ -156,6 +156,7 @@ async def transcribe_audio(
             os.unlink(wav_path)
         if len(audio.shape) > 1:
             audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
 
         duration = len(audio) / sr
 
