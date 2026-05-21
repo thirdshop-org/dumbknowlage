@@ -174,7 +174,7 @@ async def ingest_text(
 
     doc_chunks = chunk_text(text)
     chunks = [
-        {"text": c, "chunk_index": i, "start_time": 0.0, "end_time": 0.0}
+        {"text": c["text"], "chunk_index": i, "start_time": 0.0, "end_time": 0.0}
         for i, c in enumerate(doc_chunks)
     ]
     store.insert_chunks_batch(session_id, chunks)
