@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -130,16 +131,23 @@ async def transcribe_audio(
     language: str = Query("fr"),
     build_graph: bool = Query(True),
 ):
+    # Read upload in the loop, then offload the CPU-heavy work to a worker
+    # thread so the event loop stays responsive for /health, /mcp, and the
+    # next chunk upload while Whisper/spaCy run.
+    raw = await file.read()
+    filename = file.filename or "audio_upload"
+    return await asyncio.to_thread(
+        _transcribe_sync, raw, filename, language, build_graph
+    )
+
+
+def _transcribe_sync(raw: bytes, filename: str, language: str, build_graph: bool):
     import traceback
     import numpy as np
     import soundfile as sf
-    from io import BytesIO
-    from audio.chunker import chunk_audio
     from transcription.transcriber import Transcriber
 
     try:
-        # Convert to WAV via ffmpeg (handles mp3, m4a, etc.)
-        raw = await file.read()
         import subprocess, tempfile, os
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             wav_path = tmp.name
@@ -162,7 +170,7 @@ async def transcribe_audio(
 
         store = _get_store()
         session_id = store.create_session(
-            source=file.filename or "audio_upload",
+            source=filename,
             language=language,
             model=f"whisper-{config.whisper.model}",
             duration=duration,
@@ -180,6 +188,8 @@ async def transcribe_audio(
         store.close()
 
         return SessionCreateResponse(session_id=session_id, chunks_count=len(chunks))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Transcribe error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
 
@@ -194,6 +204,12 @@ async def ingest_text(
     language: str = Query("fr"),
     build_graph: bool = Query(True),
 ):
+    return await asyncio.to_thread(
+        _ingest_text_sync, text, filename, language, build_graph
+    )
+
+
+def _ingest_text_sync(text: str, filename: str, language: str, build_graph: bool):
     from document.reader import chunk_text
 
     store = _get_store()
