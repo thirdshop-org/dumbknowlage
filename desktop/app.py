@@ -73,9 +73,17 @@ class TrayApp:
         if self.recorder_panel.is_recording:
             self.recorder_panel.stop_recording()
             self.record_act.setText("Start Recording")
+            self.tray.setToolTip("notes-graph")
         else:
             self.recorder_panel.start_recording()
             self.record_act.setText("Stop Recording")
+            self.tray.setToolTip("notes-graph — recording")
+            self.tray.showMessage(
+                "Recording started",
+                "Click tray → Stop Recording to finish.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
 
     def run_ocr(self):
         try:

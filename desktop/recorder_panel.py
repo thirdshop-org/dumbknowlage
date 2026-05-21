@@ -138,9 +138,6 @@ class RecorderPanel(QWidget):
         self._ui_timer.start(200)
 
         self._chunk_timer.start(self._chunk_interval_ms)
-        self._center_on_screen()
-        self.show()
-        self.raise_()
 
     def _record_worker(self):
         while self.is_recording:
