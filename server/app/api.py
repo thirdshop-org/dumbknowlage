@@ -119,15 +119,24 @@ async def transcribe_audio(
     from audio.chunker import chunk_audio
     from transcription.transcriber import Transcriber
 
-    # Read and convert audio
+    # Convert to WAV via ffmpeg (handles mp3, m4a, etc.)
     raw = await file.read()
-    audio, sr = sf.read(BytesIO(raw))
+    import subprocess, tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", "pipe:0", "-ac", "1", "-ar", str(config.chunk.sample_rate),
+             "-sample_fmt", "s16", "-y", wav_path],
+            input=raw, capture_output=True, timeout=120,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg error: {proc.stderr.decode()}")
+        audio, sr = sf.read(wav_path)
+    finally:
+        os.unlink(wav_path)
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
-    if sr != config.chunk.sample_rate:
-        from scipy.signal import resample
-        audio = resample(audio, int(len(audio) * config.chunk.sample_rate / sr))
-        sr = config.chunk.sample_rate
 
     duration = len(audio) / sr
 
