@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from datetime import datetime
@@ -151,6 +152,19 @@ def cmd_transcribe(args: argparse.Namespace):
     _run_nlp_pipeline(store, session_id, chunks, lang, args.build_graph)
 
 
+_ASR_NOISE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"sous[- ]?titrage\s*(st['\u2019]\s*)?\d+", re.IGNORECASE),
+    re.compile(r"^[\s.\u2026]+$"),
+    re.compile(r"^[aà]\s*$", re.IGNORECASE),
+]
+
+
+def _clean_chunk_text(text: str) -> str:
+    for pat in _ASR_NOISE_PATTERNS:
+        text = pat.sub("", text)
+    return text.strip()
+
+
 def _run_nlp_pipeline(
     store: SQLiteStore,
     session_id: str,
@@ -160,6 +174,11 @@ def _run_nlp_pipeline(
     doc_metadata: dict | None = None,
 ):
     console.print("\n[bold cyan]Analyse NLP...[/]")
+
+    for c in chunks:
+        clean = _clean_chunk_text(c["text"])
+        if clean != c["text"]:
+            c["text"] = clean
 
     full_text = " ".join(c["text"] for c in chunks)
 
@@ -395,7 +414,14 @@ def _build_graph(session_id, spacy_result, chunks, co_occurrences, topics,
                     pair = (k1, k2) if k1 < k2 else (k2, k1)
                     if pair not in seen_pairs:
                         seen_pairs.add(pair)
-                        gm.create_related_to(t1, k1, t2, k2, weight=1.0)
+                        if {t1, t2} == {"Person", "Organization"}:
+                            p_key, o_key = (k1, k2) if t1 == "Person" else (k2, k1)
+                            gm.create_works_for(p_key, o_key)
+                        elif {t1, t2} == {"Person", "Location"}:
+                            p_key, l_key = (k1, k2) if t1 == "Person" else (k2, k1)
+                            gm.create_located_in("Person", p_key, l_key)
+                        else:
+                            gm.create_related_to(t1, k1, t2, k2, weight=1.0)
 
     # Sentences
     sentences = []

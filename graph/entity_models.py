@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import re
+
 from graph.models import sanitize_key
 
 
 ENTITY_CONFIDENCE_LOW = 0.40
 ENTITY_CONFIDENCE_HIGH = 0.75
+
+_REJECT_ENTITY_PATTERNS: list[re.Pattern] = [
+    re.compile(r"^https?://", re.IGNORECASE),
+    re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", re.IGNORECASE),
+    re.compile(r"^getenv\(", re.IGNORECASE),
+    re.compile(r"^[\s{}|=$/\\<>]+$"),
+]
+
+
+def _is_valid_entity_name(name: str) -> bool:
+    if any(p.search(name) for p in _REJECT_ENTITY_PATTERNS):
+        return False
+    stripped = name.strip()
+    if len(stripped) < 2:
+        return False
+    if stripped.count("\n") > 2:
+        return False
+    return True
 
 
 class EntityBase:
@@ -105,6 +125,9 @@ def entity_from_label(label: str, text: str,
                       active_rules: list[dict] | None = None) -> EntityBase | None:
     cls = ENTITY_CLASSES.get(label.upper())
     if cls is None:
+        return None
+
+    if not _is_valid_entity_name(text):
         return None
 
     from graph.confidence import compute_confidence

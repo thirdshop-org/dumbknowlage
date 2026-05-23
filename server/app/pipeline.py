@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from config import config
 from storage.sqlite_store import SQLiteStore
+
+# Patterns de bruit ASR / sous-titrage à filtrer avant analyse NLP
+_ASR_NOISE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"sous[- ]?titrage\s*(st['\u2019]\s*)?\d+", re.IGNORECASE),
+    re.compile(r"^[\s.\u2026]+$"),
+    re.compile(r"^[aà]\s*$", re.IGNORECASE),
+]
+
+
+def _clean_chunk_text(text: str) -> str:
+    for pat in _ASR_NOISE_PATTERNS:
+        text = pat.sub("", text)
+    return text.strip()
 
 
 def run_nlp_pipeline(
@@ -23,6 +37,12 @@ def run_nlp_pipeline(
         detect_burst_topics,
     )
     from rag.indexer import index_session
+
+    # Filtrer le bruit ASR (sous-titrage, silences) avant toute analyse
+    for c in chunks:
+        clean = _clean_chunk_text(c["text"])
+        if clean != c["text"]:
+            c["text"] = clean
 
     full_text = " ".join(c["text"] for c in chunks)
 
@@ -178,7 +198,7 @@ def build_graph_from_analysis(
                 if w_type != h_type:
                     gm.create_related_to(w_type, w_key, h_type, h_key, weight=0.5)
 
-        # Co-occurrence entities in same chunk → RELATED_TO
+        # Co-occurrence entities in same chunk → RELATED_TO (ou WORKS_FOR si Person + Org)
         if entity_map:
             seen_pairs = set()
             for c in chunks:
@@ -193,7 +213,14 @@ def build_graph_from_analysis(
                         pair = (k1, k2) if k1 < k2 else (k2, k1)
                         if pair not in seen_pairs:
                             seen_pairs.add(pair)
-                            gm.create_related_to(t1, k1, t2, k2, weight=1.0)
+                            if {t1, t2} == {"Person", "Organization"}:
+                                p_key, o_key = (k1, k2) if t1 == "Person" else (k2, k1)
+                                gm.create_works_for(p_key, o_key)
+                            elif {t1, t2} == {"Person", "Location"}:
+                                p_key, l_key = (k1, k2) if t1 == "Person" else (k2, k1)
+                                gm.create_located_in("Person", p_key, l_key)
+                            else:
+                                gm.create_related_to(t1, k1, t2, k2, weight=1.0)
 
         # Sentences
         sentences = []
